@@ -85,6 +85,49 @@
 	gap: 12px;
 }
 
+/* P1: 顶部标签 */
+.specs-tab-bar {
+	display: flex;
+	gap: 8px;
+	padding: 4px;
+	background: var(--vscode-editor-background);
+	border-radius: 6px;
+}
+
+.specs-tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 12px;
+	border-radius: 5px;
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+	user-select: none;
+}
+
+.specs-tab:hover {
+	background: var(--vscode-list-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.specs-tab.active {
+	background: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground);
+}
+
+.specs-tab-index {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	border-radius: 999px;
+	font-size: 10px;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
 /* Progress Section */
 .specs-progress-section {
 	background: var(--vscode-editor-background);
@@ -225,6 +268,13 @@
 	transition: all 0.2s ease;
 }
 
+.specs-task-card {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 8px;
+	padding: 10px;
+}
+
 .specs-task-item.completed {
 	opacity: 0.6;
 }
@@ -259,6 +309,27 @@
 	margin-left: 8px;
 }
 
+.specs-task-actions {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-end;
+}
+
+.specs-task-actions .monaco-button {
+	min-width: 72px;
+	padding: 4px 8px;
+}
+
+.specs-task-status.spinning {
+	animation: specs-spin 1s linear infinite;
+	display: inline-block;
+}
+
+@keyframes specs-spin {
+	0% { transform: rotate(0deg); }
+	100% { transform: rotate(360deg); }
+}
+
 .specs-task-item.completed .specs-task-title {
 	text-decoration: line-through;
 }
@@ -275,4 +346,23 @@
 
 .specs-actions-section .monaco-button {
 	width: 100%;
+}
+
+.specs-design-section {
+	background: var(--vscode-editor-background);
+	border-radius: 6px;
+	padding: 12px;
+}
+
+.specs-design-card {
+	background: var(--vscode-input-background);
+	border-radius: 4px;
+	padding: 10px;
+	margin-top: 8px;
+	font-size: 12px;
+}
+
+.specs-design-empty {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
 }

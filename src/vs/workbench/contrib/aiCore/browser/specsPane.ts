@@ -36,6 +36,8 @@ export class SpecsPane extends ViewPane {
 	private _contentSection!: HTMLElement;
 	private _emptyState!: HTMLElement;
 	private _sessionView!: HTMLElement;
+	private _activeTab: 'requirements' | 'design' | 'tasks' = 'requirements';
+	private _executingTaskId: string | undefined;
 
 	private readonly _disposables = new DisposableStore();
 
@@ -58,7 +60,10 @@ export class SpecsPane extends ViewPane {
 
 		// 监听会话更新
 		this._disposables.add(this.specModeService.onDidUpdateSession(() => this._updateView()));
-		this._disposables.add(this.specModeService.onDidChangePhase(() => this._updateView()));
+		this._disposables.add(this.specModeService.onDidChangePhase((phase) => {
+			this._setActiveTabByPhase(phase);
+			this._updateView();
+		}));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -131,6 +136,7 @@ export class SpecsPane extends ViewPane {
 		const session = this.specModeService.getCurrentSession();
 
 		if (session) {
+			this._setActiveTabByPhase(session.phase);
 			this._emptyState.style.display = 'none';
 			this._sessionView.style.display = 'block';
 			this._renderSessionView(session);
@@ -149,14 +155,51 @@ export class SpecsPane extends ViewPane {
 		// 阶段指示器
 		this._renderPhaseIndicator(session);
 
-		// 用户故事
-		this._renderStoriesSection(session);
+		// 顶部标签导航（P1.1）
+		this._renderTabBar();
 
-		// 任务列表
-		this._renderTasksSection(session);
+		// 根据标签渲染内容
+		if (this._activeTab === 'requirements') {
+			this._renderStoriesSection(session);
+		} else if (this._activeTab === 'design') {
+			this._renderDesignSection(session);
+		} else {
+			this._renderTasksSection(session);
+		}
 
 		// 操作按钮
 		this._renderActionsSection(session);
+	}
+
+	private _setActiveTabByPhase(phase: string): void {
+		if (phase === 'requirement_gathering' || phase === 'story_generation' || phase === 'story_review') {
+			this._activeTab = 'requirements';
+		} else if (phase === 'design_generation' || phase === 'design_review') {
+			this._activeTab = 'design';
+		} else if (phase === 'task_generation' || phase === 'task_execution' || phase === 'completed') {
+			this._activeTab = 'tasks';
+		}
+	}
+
+	private _renderTabBar(): void {
+		const tabBar = dom.append(this._sessionView, dom.$('.specs-tab-bar'));
+		const tabs: Array<{ id: 'requirements' | 'design' | 'tasks'; label: string; index: string }> = [
+			{ id: 'requirements', label: 'Requirements', index: '1' },
+			{ id: 'design', label: 'Design', index: '2' },
+			{ id: 'tasks', label: 'Tasks', index: '3' }
+		];
+
+		for (const tab of tabs) {
+			const tabEl = dom.append(tabBar, dom.$('.specs-tab'));
+			if (this._activeTab === tab.id) {
+				tabEl.classList.add('active');
+			}
+			tabEl.innerHTML = `<span class="specs-tab-index">${tab.index}</span>${tab.label}`;
+			this._disposables.add(dom.addDisposableListener(tabEl, dom.EventType.CLICK, () => {
+				this._activeTab = tab.id;
+				this._updateView();
+			}));
+		}
 	}
 
 	private _renderProgressSection(session: SpecSession): void {
@@ -236,6 +279,24 @@ export class SpecsPane extends ViewPane {
 		}
 	}
 
+	private _renderDesignSection(session: SpecSession): void {
+		const section = dom.append(this._sessionView, dom.$('.specs-design-section'));
+		const header = dom.append(section, dom.$('.specs-section-header'));
+		header.textContent = '🏗️ 技术设计';
+
+		if (!session.technicalDesign) {
+			const empty = dom.append(section, dom.$('.specs-design-empty'));
+			empty.textContent = '等待需求确认后生成技术设计...';
+			return;
+		}
+
+		const overview = dom.append(section, dom.$('.specs-design-card'));
+		overview.innerHTML = `<strong>架构概述</strong><div>${session.technicalDesign.overview}</div>`;
+
+		const comps = dom.append(section, dom.$('.specs-design-card'));
+		comps.innerHTML = `<strong>组件数量</strong><div>${session.technicalDesign.components.length} 个</div>`;
+	}
+
 	private _renderStoryItem(container: HTMLElement, story: UserStory): void {
 		const item = dom.append(container, dom.$('.specs-story-item'));
 
@@ -275,10 +336,12 @@ export class SpecsPane extends ViewPane {
 
 	private _renderTaskItem(container: HTMLElement, task: SpecTask): void {
 		const item = dom.append(container, dom.$('.specs-task-item'));
+		item.classList.add('specs-task-card');
 
+		const isExecuting = this._executingTaskId === task.id || task.status === 'in_progress';
 		const statusIcon = task.status === 'completed' ? '✅' :
-			task.status === 'in_progress' ? '🔄' :
-			task.status === 'blocked' ? '🚫' : '⏳';
+			isExecuting ? '🔄' :
+				task.status === 'blocked' || task.status === 'failed' ? '❌' : '⏳';
 
 		const typeIcon = task.type === 'implementation' ? '💻' :
 			task.type === 'test' ? '🧪' :
@@ -294,12 +357,49 @@ export class SpecsPane extends ViewPane {
 
 		const status = dom.append(content, dom.$('.specs-task-status'));
 		status.textContent = statusIcon;
+		if (isExecuting) {
+			status.classList.add('spinning');
+		}
+
+		const actions = dom.append(item, dom.$('.specs-task-actions'));
+		if (task.status === 'pending') {
+			const startBtn = new Button(actions, { ...defaultButtonStyles });
+			startBtn.label = '▶ Start';
+			this._disposables.add(startBtn.onDidClick(() => this._executeTask(task)));
+			this._disposables.add(startBtn);
+		} else if (task.status === 'blocked' || task.status === 'failed') {
+			const retryBtn = new Button(actions, { ...defaultButtonStyles });
+			retryBtn.label = '↻ Retry';
+			this._disposables.add(retryBtn.onDidClick(() => this._retryTask(task)));
+			this._disposables.add(retryBtn);
+		}
 
 		if (task.status === 'completed') {
 			item.classList.add('completed');
-		} else if (task.status === 'in_progress') {
+		} else if (isExecuting) {
 			item.classList.add('in-progress');
 		}
+	}
+
+	private async _executeTask(task: SpecTask): Promise<void> {
+		this._executingTaskId = task.id;
+		this.specModeService.startTask(task.id);
+		this._updateView();
+
+		try {
+			const result = await this.specModeService.executeTaskWithLLM(task);
+			if (!result.success) {
+				this.specModeService.failTask(task.id, result.result);
+			}
+		} finally {
+			this._executingTaskId = undefined;
+			this._updateView();
+		}
+	}
+
+	private async _retryTask(task: SpecTask): Promise<void> {
+		this.specModeService.retryTask(task.id);
+		await this._executeTask(task);
 	}
 
 	private _renderActionsSection(session: SpecSession): void {

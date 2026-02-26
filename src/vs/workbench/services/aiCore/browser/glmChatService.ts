@@ -97,8 +97,18 @@ export interface GLMChatOptions {
 	searchEngine?: 'search_std' | 'search_pro' | 'search_pro_sogou' | 'search_pro_quark';
 	/** 会话 ID，用于关联上下文 */
 	sessionId?: string;
-	/** 跳过用户消息（用于工具调用续接） */
-	skipUserMessage?: boolean;
+}
+
+export interface GLMTaskRoutingPlan {
+	complexity: 'simple' | 'medium' | 'hard';
+	subAgent: 'quick_responder' | 'implementation_agent' | 'planning_agent';
+	model: string;
+	requiresVision: boolean;
+	enableThinking: boolean;
+	enableWebSearch: boolean;
+	maxTokens: number;
+	reason: string;
+	confidence: number;
 }
 
 // ============================================================================
@@ -225,6 +235,11 @@ export interface IGLMChatService {
 	 * 获取缓存统计信息
 	 */
 	getCacheStats(sessionId?: string): { totalTokens: number; cachedTokens: number; savings: string };
+
+	/**
+	 * 使用 GLM-5 做前置任务分析，返回自动路由计划
+	 */
+	analyzeTaskAndRoute(userMessage: string, context: GLMChatContext, chatMode: 'vibe' | 'spec', isAgentMode: boolean, forceRouter?: boolean): Promise<GLMTaskRoutingPlan>;
 }
 
 // ============================================================================
@@ -237,6 +252,7 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 	private readonly API_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 	private readonly DEFAULT_API_KEY = '20cca2b90c8c4348aaab3d4f6814c33b.Ow4WJfqfc06uB4KI';
 	private readonly DEFAULT_MODEL = 'glm-4.7';
+	private readonly ROUTER_MODEL = 'glm-5';
 
 	// ========================================================================
 	// 会话管理 - 支持上下文缓存
@@ -412,24 +428,19 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 			this.logService.info(`[GLMChatService] Auto-created session for chat: ${session.id}`);
 		}
 
-		// 添加用户消息到会话（除非跳过，用于工具调用续接）
-		if (!options?.skipUserMessage && userMessage) {
-			this.addMessage(session.id, {
-				role: 'user',
-				content: userMessage
-			});
-		} else if (options?.skipUserMessage) {
-			this.logService.info(`[GLMChatService] Skipping user message for tool call continuation`);
-		}
+		// 添加用户消息到会话
+		this.addMessage(session.id, {
+			role: 'user',
+			content: userMessage
+		});
 
 		// 构建完整的消息列表（利用上下文缓存）
 		const messages = this.getSessionMessages(session.id);
 
 		this.logService.info(`[GLMChatService] Sending chat with ${messages.length} messages (session: ${session.id})`);
 
-		// 收集助手回复和工具调用
+		// 收集助手回复
 		let assistantContent = '';
-		const toolCalls: GLMToolCall[] = [];
 
 		// 使用流式聊天
 		for await (const event of this.streamChatWithContinuation(messages, context, options, token)) {
@@ -438,36 +449,16 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 				assistantContent += event.content;
 			}
 
-			// 收集工具调用
-			if (event.type === 'tool_call' && event.toolCall) {
-				toolCalls.push({
-					id: event.toolCall.id,
-					type: 'function',
-					function: {
-						name: event.toolCall.function.name,
-						arguments: event.toolCall.function.arguments
-					}
-				});
-			}
-
 			yield event;
 		}
 
 		// 添加助手回复到会话历史
-		if (assistantContent || toolCalls.length > 0) {
-			const assistantMessage: GLMMessage = {
+		if (assistantContent) {
+			this.addMessage(session.id, {
 				role: 'assistant',
-				content: assistantContent || undefined
-			};
-
-			// 如果有工具调用，添加到消息中
-			if (toolCalls.length > 0) {
-				assistantMessage.tool_calls = toolCalls;
-				this.logService.info(`[GLMChatService] Added assistant message with ${toolCalls.length} tool calls`);
-			}
-
-			this.addMessage(session.id, assistantMessage);
-			this.logService.info(`[GLMChatService] Added assistant response to session (${assistantContent.length} chars, ${toolCalls.length} tool calls)`);
+				content: assistantContent
+			});
+			this.logService.info(`[GLMChatService] Added assistant response to session (${assistantContent.length} chars)`);
 		}
 	}
 
@@ -511,6 +502,184 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 
 	private getModel(): string {
 		return this.configurationService.getValue<string>('aiCore.glmModel') || this.DEFAULT_MODEL;
+	}
+
+	private isAutoRoutingEnabled(): boolean {
+		return this.configurationService.getValue<boolean>('aiCore.enableAutoModelRouting') !== false;
+	}
+
+	private isVisionRoutingEnabled(): boolean {
+		return this.configurationService.getValue<boolean>('aiCore.enableVisionRouting') !== false;
+	}
+
+	private getModelByComplexity(complexity: 'simple' | 'medium' | 'hard'): string {
+		if (complexity === 'simple') {
+			return this.configurationService.getValue<string>('aiCore.routingModelSimple') || 'glm-4.7-flash';
+		}
+		if (complexity === 'medium') {
+			return this.configurationService.getValue<string>('aiCore.routingModelMedium') || 'glm-4.7';
+		}
+		return this.configurationService.getValue<string>('aiCore.routingModelHard') || 'glm-5';
+	}
+
+	private getVisionModelByComplexity(complexity: 'simple' | 'medium' | 'hard'): string {
+		if (complexity === 'simple') {
+			return this.configurationService.getValue<string>('aiCore.routingVisionModelSimple') || 'glm-4.6v-flash';
+		}
+		if (complexity === 'medium') {
+			return this.configurationService.getValue<string>('aiCore.routingVisionModelMedium') || 'glm-4.6v-flashx';
+		}
+		return this.configurationService.getValue<string>('aiCore.routingVisionModelHard') || 'glm-4.6v';
+	}
+
+	private hasVisualInputs(userMessage: string, context: GLMChatContext): boolean {
+		const visualExtRe = /\.(png|jpg|jpeg|webp|gif|bmp|svg|mp4|mov|avi|mkv|webm|pdf)$/i;
+		const hasVisualFile = context.files.some(f => visualExtRe.test(f.path) || f.language === 'binary');
+		const hasVisualIntent = /图片|图像|看图|识图|截图|视频|多模态|视觉|ocr|pdf|文档解析|image|video|vision/i.test(userMessage);
+		return hasVisualFile || hasVisualIntent;
+	}
+
+	private getFallbackRoutingPlan(userMessage: string): GLMTaskRoutingPlan {
+		const len = userMessage.length;
+		const hasCodeIntent = /代码|修复|调试|实现|重构|架构|设计|性能|bug|error|refactor|implement|debug/i.test(userMessage);
+		const hasPlanningIntent = /方案|架构|设计|规划|spec|需求|任务分解|trade-?off/i.test(userMessage);
+
+		if (hasPlanningIntent || len > 500) {
+			return {
+				complexity: 'hard',
+				subAgent: 'planning_agent',
+				model: this.getModelByComplexity('hard'),
+				requiresVision: false,
+				enableThinking: true,
+				enableWebSearch: true,
+				maxTokens: 32768,
+				reason: '本地启发式判定为复杂规划类任务',
+				confidence: 0.62
+			};
+		}
+
+		if (hasCodeIntent || len > 120) {
+			return {
+				complexity: 'medium',
+				subAgent: 'implementation_agent',
+				model: this.getModelByComplexity('medium'),
+				requiresVision: false,
+				enableThinking: true,
+				enableWebSearch: true,
+				maxTokens: 16384,
+				reason: '本地启发式判定为中等实现类任务',
+				confidence: 0.58
+			};
+		}
+
+		return {
+			complexity: 'simple',
+			subAgent: 'quick_responder',
+			model: this.getModelByComplexity('simple'),
+			requiresVision: false,
+			enableThinking: false,
+			enableWebSearch: false,
+			maxTokens: 8192,
+			reason: '本地启发式判定为简单问答',
+			confidence: 0.55
+		};
+	}
+
+	async analyzeTaskAndRoute(userMessage: string, context: GLMChatContext, chatMode: 'vibe' | 'spec', isAgentMode: boolean, forceRouter: boolean = false): Promise<GLMTaskRoutingPlan> {
+		if (!this.isAutoRoutingEnabled() && !forceRouter) {
+			return {
+				complexity: 'medium',
+				subAgent: 'implementation_agent',
+				model: this.getModel(),
+				requiresVision: false,
+				enableThinking: this.isThinkingEnabled(),
+				enableWebSearch: this.isWebSearchEnabled(),
+				maxTokens: 16384,
+				reason: '自动路由已关闭，使用默认配置',
+				confidence: 1
+			};
+		}
+
+		const hasVisionInputs = this.hasVisualInputs(userMessage, context) && this.isVisionRoutingEnabled();
+		const prompt = [
+			'你是一个任务路由器。请评估用户请求难度并返回 JSON，不要输出其他内容。',
+			'可选复杂度：simple | medium | hard',
+			'可选子代理：quick_responder | implementation_agent | planning_agent',
+			'是否需要视觉模型：requiresVision=true|false',
+			'仅返回如下 JSON:',
+			'{"complexity":"simple|medium|hard","subAgent":"quick_responder|implementation_agent|planning_agent","requiresVision":true,"reason":"简短理由","confidence":0.0}',
+			'',
+			`ChatMode: ${chatMode}`,
+			`AgentMode: ${isAgentMode}`,
+			`AttachedFiles: ${context.files.length}`,
+			`HasVisionInputs: ${hasVisionInputs}`,
+			`UserMessage: ${userMessage}`
+		].join('\n');
+
+		try {
+			const response = await fetch(this.API_ENDPOINT, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${this.getApiKey()}`
+				},
+				body: JSON.stringify({
+					model: this.ROUTER_MODEL,
+					messages: [
+						{ role: 'system', content: '你是严谨的任务难度评估器。输出必须是合法 JSON。' },
+						{ role: 'user', content: prompt }
+					],
+					temperature: 0.1,
+					max_tokens: 300,
+					stream: false
+				})
+			});
+
+			if (!response.ok) {
+				this.logService.warn(`[GLMChatService] Router model failed: ${response.status}, fallback to heuristic`);
+				return this.getFallbackRoutingPlan(userMessage);
+			}
+
+			const data = await response.json();
+			const content = data?.choices?.[0]?.message?.content || '';
+			const match = content.match(/\{[\s\S]*\}/);
+			if (!match) {
+				this.logService.warn('[GLMChatService] Router JSON not found, fallback to heuristic');
+				return this.getFallbackRoutingPlan(userMessage);
+			}
+
+			const parsed = JSON.parse(match[0]) as {
+				complexity?: 'simple' | 'medium' | 'hard';
+				subAgent?: 'quick_responder' | 'implementation_agent' | 'planning_agent';
+				requiresVision?: boolean;
+				reason?: string;
+				confidence?: number;
+			};
+
+			const complexity = parsed.complexity ?? 'medium';
+			const subAgent = parsed.subAgent ?? (complexity === 'hard' ? 'planning_agent' : complexity === 'simple' ? 'quick_responder' : 'implementation_agent');
+			const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.7;
+			const requiresVision = Boolean(parsed.requiresVision) || hasVisionInputs;
+			const routedModel = requiresVision ? this.getVisionModelByComplexity(complexity) : this.getModelByComplexity(complexity);
+
+			const plan: GLMTaskRoutingPlan = {
+				complexity,
+				subAgent,
+				model: routedModel,
+				requiresVision,
+				enableThinking: complexity !== 'simple',
+				enableWebSearch: complexity !== 'simple',
+				maxTokens: complexity === 'hard' ? 32768 : complexity === 'medium' ? 16384 : 8192,
+				reason: parsed.reason || 'GLM-5 路由评估',
+				confidence
+			};
+
+			this.logService.info(`[GLMChatService] Routing plan: complexity=${plan.complexity}, subAgent=${plan.subAgent}, vision=${plan.requiresVision}, model=${plan.model}, confidence=${plan.confidence}`);
+			return plan;
+		} catch (error) {
+			this.logService.warn(`[GLMChatService] Router error, fallback to heuristic: ${String(error)}`);
+			return this.getFallbackRoutingPlan(userMessage);
+		}
 	}
 
 	/**
@@ -560,196 +729,6 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 			this.logService.error(`[GLMChatService] Connection test failed: ${String(error)}`);
 			return false;
 		}
-	}
-
-	/**
-	 * 判断是否应该触发 Web Search
-	 * 基于消息内容智能判断，避免不必要的搜索
-	 */
-	private shouldTriggerWebSearch(message: string): boolean {
-		const lowerMessage = message.toLowerCase();
-
-		// ============================================================================
-		// 规则1: 包含 URL 或网站链接（优先检测）
-		// ============================================================================
-		const urlPatterns = [
-			// 完整 URL
-			/https?:\/\/[^\s]+/i,
-			// www 开头
-			/www\.[^\s]+/i,
-			// 常见顶级域名
-			/[a-zA-Z0-9][-a-zA-Z0-9]*\.(com|org|net|cn|io|dev|app|ai|co|cc|me|info|biz|edu|gov|mil|int|tv|mobi|name|pro|asia|eu|us|uk|de|fr|jp|kr|ru|br|in|au|ca|it|es|nl|se|no|fi|dk|pl|cz|at|ch|be|pt|gr|tr|mx|ar|cl|co\.uk|com\.cn|net\.cn|org\.cn|gov\.cn|ac\.cn|com\.tw|com\.hk|co\.jp|co\.kr|com\.au|co\.nz|com\.br|com\.mx|com\.ar)/i,
-			// 中文网站引用
-			/访问.{0,10}网站/,
-			/打开.{0,10}链接/,
-			/这个.{0,5}(网址|链接|网站|页面)/
-		];
-		if (urlPatterns.some(pattern => pattern.test(message))) {
-			this.logService.trace('[GLMChatService] Web search triggered: contains URL or link reference');
-			return true;
-		}
-
-		// ============================================================================
-		// 规则2: 明确请求搜索
-		// ============================================================================
-		const explicitSearchKeywords = [
-			// 中文搜索请求
-			'搜索', '搜一下', '搜一搜', '查一下', '查一查', '查查', '帮我查', '帮我找',
-			'上网找', '网上找', '网上搜', '在线查', '在线搜',
-			'找一下', '找找', '查询', '检索',
-			// 搜索引擎
-			'google', 'bing', 'baidu', '百度', '谷歌', '必应', 'duckduckgo', 'yahoo', '搜狗', '360搜索',
-			// 英文搜索请求
-			'search for', 'search about', 'look up', 'look for', 'find out', 'find information',
-			'google it', 'search online', 'search the web', 'web search'
-		];
-		if (explicitSearchKeywords.some(kw => lowerMessage.includes(kw))) {
-			this.logService.trace('[GLMChatService] Web search triggered: explicit search request');
-			return true;
-		}
-
-		// ============================================================================
-		// 规则3: 询问实时/时效性信息
-		// ============================================================================
-		const realtimeKeywords = [
-			// 时效性关键词（中文）
-			'最新', '最近', '现在', '当前', '目前', '如今', '眼下', '时下',
-			'今天', '昨天', '前天', '明天', '今晚', '今早', '今日', '昨日',
-			'今年', '去年', '前年', '明年', '本年度',
-			'这个月', '上个月', '下个月', '本月', '上月',
-			'这周', '上周', '下周', '本周', '这星期', '上星期',
-			'刚刚', '刚才', '近期', '近日', '近来', '新近',
-			// 时效性关键词（英文）
-			'latest', 'newest', 'current', 'recent', 'now', 'nowadays',
-			'today', 'yesterday', 'tomorrow', 'tonight',
-			'this year', 'last year', 'next year',
-			'this month', 'last month', 'next month',
-			'this week', 'last week', 'next week',
-			'just now', 'recently', 'currently',
-			// 实时数据类型
-			'天气', '气温', '温度', '降雨', '下雨', '下雪', '台风', '预报',
-			'weather', 'temperature', 'forecast', 'rain', 'snow',
-			'股价', '股票', '股市', '大盘', '指数', '涨跌', 'a股', '港股', '美股',
-			'stock', 'stocks', 'market', 'index', 'nasdaq', 'dow jones', 's&p',
-			'汇率', '外汇', '币价', '比特币', '以太坊', '加密货币', '虚拟货币',
-			'exchange rate', 'forex', 'bitcoin', 'btc', 'eth', 'crypto', 'cryptocurrency',
-			'新闻', '头条', '热点', '热搜', '舆论', '时事', '快讯', '资讯', '消息',
-			'news', 'headline', 'headlines', 'trending', 'hot topic', 'breaking',
-			'比分', '比赛', '赛事', '战绩', '积分榜', '排名', '联赛', '世界杯', '欧冠', 'nba', 'cba',
-			'score', 'match', 'game', 'championship', 'league', 'tournament',
-			'票房', '收视率', '播放量', '销量', '排行榜',
-			'box office', 'ratings', 'views', 'sales', 'ranking',
-			// 版本/更新
-			'最新版本', '新版', '新版本', '更新了', '升级了', '发布了',
-			'latest version', 'new version', 'new release', 'update', 'upgrade',
-			// 事件/活动
-			'什么时候', '几点', '日期', '时间表', '日程', '活动',
-			'when is', 'what time', 'schedule', 'event', 'happening'
-		];
-		if (realtimeKeywords.some(kw => lowerMessage.includes(kw))) {
-			this.logService.trace('[GLMChatService] Web search triggered: realtime info request');
-			return true;
-		}
-
-		// ============================================================================
-		// 规则4: 询问特定实体的信息（人物、公司、产品等）
-		// ============================================================================
-		const entityQueryKeywords = [
-			// 动态/新闻类
-			'发布了', '推出了', '更新了', '宣布了', '公告', '声明',
-			'发布会', '新品', '上市', '上线', '开售', '开放',
-			'released', 'announced', 'launched', 'unveiled', 'introduced',
-			// 查询类
-			'是谁', '是什么', '怎么样', '好不好', '值得', '推荐',
-			'有没有', '有多少', '多少钱', '价格', '售价', '报价',
-			'who is', 'what is', 'how is', 'how much', 'how many', 'price',
-			// 比较类
-			'对比', '比较', '区别', '差异', 'vs', 'versus', 'compare', 'comparison', 'difference',
-			// 评价类
-			'评价', '评测', '测评', '口碑', '好评', '差评', '反馈',
-			'review', 'reviews', 'rating', 'ratings', 'feedback',
-			// 官方信息
-			'官网', '官方', '官方网站', '官方文档', '官方说明',
-			'official', 'official website', 'official docs', 'documentation'
-		];
-		if (entityQueryKeywords.some(kw => lowerMessage.includes(kw))) {
-			this.logService.trace('[GLMChatService] Web search triggered: entity query');
-			return true;
-		}
-
-		// ============================================================================
-		// 规则5: 地理/位置相关查询
-		// ============================================================================
-		const locationKeywords = [
-			'在哪里', '在哪儿', '地址', '位置', '怎么走', '怎么去', '路线', '导航', '地图',
-			'附近', '周边', '最近的', '距离',
-			'where is', 'location', 'address', 'how to get', 'directions', 'map', 'nearby', 'distance'
-		];
-		if (locationKeywords.some(kw => lowerMessage.includes(kw))) {
-			this.logService.trace('[GLMChatService] Web search triggered: location query');
-			return true;
-		}
-
-		// ============================================================================
-		// 规则6: 知识百科类查询（可能需要最新信息）
-		// ============================================================================
-		const wikiQueryPatterns = [
-			/什么是.{2,20}$/,
-			/^.{2,20}是什么/,
-			/谁是.{2,20}$/,
-			/^.{2,20}是谁/,
-			/介绍一下.{2,20}$/,
-			/^explain\s+/i,
-			/^what\s+is\s+/i,
-			/^who\s+is\s+/i,
-			/^tell\s+me\s+about\s+/i
-		];
-		if (wikiQueryPatterns.some(pattern => pattern.test(lowerMessage))) {
-			// 但要排除编程概念
-			const programmingConcepts = [
-				'函数', '变量', '类', '对象', '数组', '接口', '模块', '组件',
-				'function', 'variable', 'class', 'object', 'array', 'interface', 'module', 'component',
-				'api', 'sdk', 'framework', 'library', 'package', 'dependency'
-			];
-			if (!programmingConcepts.some(kw => lowerMessage.includes(kw))) {
-				this.logService.trace('[GLMChatService] Web search triggered: wiki/knowledge query');
-				return true;
-			}
-		}
-
-		// ============================================================================
-		// 排除规则: 代码/项目相关问题 - 不需要搜索
-		// ============================================================================
-		const codeRelatedKeywords = [
-			// 代码操作（中文）
-			'修改代码', '改一下', '重构', '调试', '修复', '修bug', '实现功能',
-			'添加功能', '删除代码', '编写代码', '写代码', '写个', '帮我写',
-			// 代码操作（英文）
-			'refactor', 'debug', 'fix bug', 'implement', 'code', 'coding',
-			// 代码理解
-			'这个函数', '这段代码', '这个文件', '这个类', '这个方法', '这个变量',
-			'这行代码', '这段逻辑', '这个接口', '这个组件',
-			'this function', 'this code', 'this file', 'this class', 'this method',
-			// 项目相关
-			'工作区', '项目里', '代码库', '仓库', '目录', '文件夹', '源码',
-			'workspace', 'repository', 'repo', 'codebase', 'source code',
-			// 编程问题
-			'怎么写', '如何实现', '怎么实现', '语法', '用法', '报错', '错误', '异常',
-			'编译错误', '运行错误', '类型错误', '语法错误',
-			'how to write', 'how to implement', 'syntax error', 'type error', 'runtime error',
-			// IDE/编辑器相关
-			'vscode', 'cursor', '编辑器', 'ide', '插件', '扩展', '快捷键'
-		];
-		if (codeRelatedKeywords.some(kw => lowerMessage.includes(kw))) {
-			this.logService.trace('[GLMChatService] Web search skipped: code-related query');
-			return false;
-		}
-
-		// ============================================================================
-		// 默认: 不触发搜索（保守策略，减少 token 消耗）
-		// ============================================================================
-		this.logService.trace('[GLMChatService] Web search skipped: no trigger conditions met');
-		return false;
 	}
 
 	/**
@@ -895,40 +874,19 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 - 迭代式改进，根据反馈调整
 
 ## 可用工具
-- 读取文件 (read_file) - 读取特定文件内容
-- 列出目录 (list_dir) - 查看目录结构
-- 搜索代码 (grep_search) - 在代码中搜索关键词
-- 搜索文件 (search_files) - 按文件名搜索
-- 写入文件 (write_file) - 创建或修改文件
-- 执行命令 (run_command) - 运行终端命令
-- 获取诊断 (get_diagnostics) - 获取代码问题
-- 浏览网页 (browse_url) - 访问 URL
+- 读取和分析代码文件 (read_file)
+- 搜索项目中的代码 (grep_search, search_files)
+- 修改和创建文件 (write_file) - 需要用户确认
+- 执行终端命令 (run_command)
+- 诊断和修复错误 (get_diagnostics)
+- 浏览网页 (browse_url) - 访问任意 URL
 - 深度搜索 (web_search_deep) - 搜索并综合分析
 
-## ⚠️ 工具使用策略 - 极其重要
+## 重要
+- 不要说"我无法访问链接"，你有工具可以做到
+- 保持简洁高效
 
-1. **最小化原则**：只调用必要的工具，避免过度探索
-   - 回答简单问题不需要任何工具
-   - 查看项目结构只需 1-2 次 list_dir
-   - 不要递归遍历整个项目目录
-
-2. **快速回答**：获取足够信息后立即回答
-   - 每次工具调用后评估：是否已有足够信息回答问题？
-   - 如果是，立即停止调用工具，给出回答
-   - 不要追求"完美了解"，追求"快速有用"
-
-3. **工具调用上限**：最多调用 3-5 次工具
-   - 超过 5 次说明策略有问题
-   - 停下来，基于已有信息回答
-
-4. **优先级**：
-   - 先回答问题的核心部分
-   - 工具调用是辅助，不是目的
-
-## 回答格式
-- 必须用中文回答
-- 先给出直接答案，再补充细节
-- 如果调用了工具，必须在工具结果后给出总结性回答
+请用中文回答。
 
 `;
 		} else {
@@ -992,32 +950,30 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		const enableThinking = options?.enableThinking ?? this.isThinkingEnabled();
 		const enableWebSearch = options?.enableWebSearch ?? this.isWebSearchEnabled();
 
-		// 获取最后一条用户消息
-		const userMessages = messagesCopy.filter(m => m.role === 'user');
-		const lastUserMessage = userMessages[userMessages.length - 1]?.content || '';
+		this.logService.info(`[GLMChatService] Chat options: thinking=${enableThinking}, webSearch=${enableWebSearch}, messages=${messagesCopy.length}`);
 
-		// 智能判断是否需要触发 Web Search
-		const shouldSearch = enableWebSearch && lastUserMessage && this.shouldTriggerWebSearch(lastUserMessage);
+		// 如果启用联网搜索，先执行搜索
+		if (enableWebSearch) {
+			// 从用户消息中提取搜索关键词（使用最后一条用户消息）
+			const userMessages = messagesCopy.filter(m => m.role === 'user');
+			const lastUserMessage = userMessages[userMessages.length - 1]?.content || '';
+			if (lastUserMessage) {
+				yield { type: 'thinking', content: '🔍 正在联网搜索相关资料...' };
 
-		this.logService.info(`[GLMChatService] Chat options: thinking=${enableThinking}, webSearch=${enableWebSearch}, shouldSearch=${shouldSearch}, messages=${messagesCopy.length}`);
+				const searchResults = await this.webSearch(lastUserMessage);
+				if (searchResults.length > 0) {
+					context.webSearchResults = searchResults;
+					yield {
+						type: 'web_search',
+						content: `找到 ${searchResults.length} 条相关结果`,
+						webSearchResults: searchResults
+					};
 
-		// 只有在需要时才执行联网搜索
-		if (shouldSearch) {
-			yield { type: 'thinking', content: '🔍 正在联网搜索相关资料...' };
-
-			const searchResults = await this.webSearch(lastUserMessage);
-			if (searchResults.length > 0) {
-				context.webSearchResults = searchResults;
-				yield {
-					type: 'web_search',
-					content: `找到 ${searchResults.length} 条相关结果`,
-					webSearchResults: searchResults
-				};
-
-				// 更新系统提示词以包含搜索结果（只修改副本）
-				const systemMessage = messagesCopy.find(m => m.role === 'system');
-				if (systemMessage) {
-					systemMessage.content = this.buildSystemPrompt(context, 'chat');
+					// 更新系统提示词以包含搜索结果（只修改副本）
+					const systemMessage = messagesCopy.find(m => m.role === 'system');
+					if (systemMessage) {
+						systemMessage.content = this.buildSystemPrompt(context, 'chat');
+					}
 				}
 			}
 		}
@@ -1043,9 +999,8 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		// 添加工具定义（如果有）
 		const tools: GLMToolDefinition[] = options?.tools || [];
 
-		// 只有在智能判断需要搜索且尚未执行搜索时，才添加 web_search 工具
-		// 这样 AI 可以在需要时自主调用搜索
-		if (shouldSearch && !context.webSearchResults?.length) {
+		// 如果启用联网搜索，添加 web_search 工具
+		if (enableWebSearch && !context.webSearchResults?.length) {
 			tools.push({
 				type: 'web_search',
 				web_search: {

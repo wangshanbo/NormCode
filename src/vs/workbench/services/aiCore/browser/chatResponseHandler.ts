@@ -614,6 +614,19 @@ export class ChatContextCollector {
 				lineRange
 			};
 		} catch (error) {
+			// 对图片/视频等二进制文件提供占位上下文，供路由器识别视觉任务
+			const path = uri.fsPath.toLowerCase();
+			const isBinaryVisual = /\.(png|jpg|jpeg|webp|gif|bmp|svg|mp4|mov|avi|mkv|webm)$/i.test(path);
+			if (isBinaryVisual) {
+				logService.info(`[ChatContextCollector] Binary visual file attached: ${uri.fsPath}`);
+				return {
+					uri,
+					path: uri.fsPath,
+					content: `[Binary visual file attached: ${uri.fsPath.split('/').pop() || uri.fsPath}]`,
+					language: 'binary'
+				};
+			}
+
 			logService.warn(`[ChatContextCollector] Failed to read ${uri.fsPath}: ${String(error)}`);
 			return null;
 		}

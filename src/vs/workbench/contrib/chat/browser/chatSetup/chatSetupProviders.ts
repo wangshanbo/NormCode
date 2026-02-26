@@ -13,13 +13,16 @@ import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 import { Lazy } from '../../../../../base/common/lazy.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { localize, localize2 } from '../../../../../nls.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
+import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import product from '../../../../../platform/product/common/product.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IWorkspaceTrustManagementService } from '../../../../../platform/workspace/common/workspaceTrust.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
 import { nullExtensionDescription } from '../../../../services/extensions/common/extensions.js';
@@ -53,10 +56,11 @@ import { IOutputService } from '../../../../services/output/common/output.js';
 import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
 import { IWorkbenchIssueService } from '../../../issue/common/issue.js';
 import { IAgentToolService } from '../../../../services/aiCore/browser/agentToolService.js';
-import { IGLMChatService, GLMMessage, GLMChatContext } from '../../../../services/aiCore/browser/glmChatService.js';
+import { IGLMChatService, GLMMessage, GLMChatContext, GLMTaskRoutingPlan } from '../../../../services/aiCore/browser/glmChatService.js';
 import { ChatResponseHandler, ChatContextCollector } from '../../../../services/aiCore/browser/chatResponseHandler.js';
 import { ISpecModeService } from '../../../../services/aiCore/browser/specModeService.js';
 import { IChatModeService } from '../../../../services/aiCore/browser/chatModeService.js';
+import { ISubagentOrchestratorService } from '../../../../services/aiCore/browser/subagentOrchestratorService.js';
 import { SpecSession, SpecTask } from '../../../../services/aiCore/common/chatModeTypes.js';
 import { IContextProvidersService } from '../../../../services/aiCore/browser/contextProvidersService.js';
 
@@ -344,6 +348,11 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	readonly onUnresolvableError = this._onUnresolvableError.event;
 
 	private readonly pendingForwardedRequests = new ResourceMap<Promise<void>>();
+	private readonly autopilotFuseState = new Map<string, {
+		nudgeCount: number;
+		lastPending: number;
+		lastCompleted: number;
+	}>();
 
 	constructor(
 		private readonly context: ChatEntitlementContext,
@@ -448,6 +457,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	 */
 	private async doInvokeWithGLM(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatWidgetService: IChatWidgetService): Promise<IChatAgentResult> {
 		const widget = chatWidgetService.getWidgetBySessionResource(request.sessionResource);
+		const chatSessionKey = request.sessionResource.toString();
 		const requestModel = widget?.viewModel?.model.getRequests().at(-1);
 		if (!requestModel) {
 			this.logService.error('[AI Core GLM] Request model not found');
@@ -455,6 +465,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 
 		const userMessage = requestModel.message.text;
+
+		// 自动初始化项目级 Skills（新项目按需求生成；旧项目无 skills 时深度扫描后生成）
+		await this.ensureProjectSkills(userMessage, progress);
 
 		// ============================================================================
 		// 模式选择欢迎卡片 (Kiro 风格)
@@ -484,9 +497,32 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
 		// 检测帮助/模式选择请求
 		if (lowerMsg === '?' || lowerMsg === 'help' || lowerMsg === '帮助' || lowerMsg === '选择模式' || lowerMsg === 'mode') {
+			const specModeServiceForCard = this.instantiationService.invokeFunction(accessor => {
+				try {
+					return accessor.get(ISpecModeService);
+				} catch {
+					return undefined;
+				}
+			});
 			progress({
 				kind: 'markdownContent',
-				content: new MarkdownString(this.getModeSelectionCard())
+				content: new MarkdownString(this.getModeSelectionCard(specModeServiceForCard?.getCurrentSession()))
+			});
+			return {};
+		}
+
+		// Kiro 对齐：新会话/启动语义时展示统一入口页（Vibe + Spec 同页）
+		if (lowerMsg === '开始' || lowerMsg === 'start' || lowerMsg === 'new session' || lowerMsg === '新会话') {
+			const specModeServiceForCard = this.instantiationService.invokeFunction(accessor => {
+				try {
+					return accessor.get(ISpecModeService);
+				} catch {
+					return undefined;
+				}
+			});
+			progress({
+				kind: 'markdownContent',
+				content: new MarkdownString(this.getModeSelectionCard(specModeServiceForCard?.getCurrentSession()))
 			});
 			return {};
 		}
@@ -535,6 +571,13 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		const glmService = this.instantiationService.invokeFunction(accessor => accessor.get(IGLMChatService));
 		const agentToolService = this.instantiationService.invokeFunction(accessor => accessor.get(IAgentToolService));
 		const chatModeService = this.instantiationService.invokeFunction(accessor => accessor.get(IChatModeService));
+		const subagentService = this.instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(ISubagentOrchestratorService);
+			} catch {
+				return undefined;
+			}
+		});
 
 		// 获取当前 Chat 模式 (Vibe/Spec)
 		const chatMode = this.configurationService.getValue<'vibe' | 'spec'>('aiCore.defaultChatMode') || 'vibe';
@@ -546,13 +589,126 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			agentToolService,
 			{ enableThinking: true, enableToolCalls: isAgentMode }
 		);
+		let subagentDelegationContext = '';
 
 		try {
-			// 获取深度思考和联网搜索设置
-			const enableThinking = glmService.isThinkingEnabled();
-			const enableWebSearch = glmService.isWebSearchEnabled();
+			// 获取深度思考和联网搜索设置（会被 GLM-5 路由器动态覆盖）
+			let enableThinking = glmService.isThinkingEnabled();
+			let enableWebSearch = glmService.isWebSearchEnabled();
+			let selectedModel: string | undefined = undefined;
+			let selectedMaxTokens: number | undefined = undefined;
 
 			this.logService.info(`[AI Core GLM] Settings: Thinking=${enableThinking}, WebSearch=${enableWebSearch}, ChatMode=${chatMode}`);
+
+			// 显式子代理调用：/agent-name ... 或 resume agent <id> ...
+			if (subagentService?.isEnabled()) {
+				await subagentService.ensureDefaultSubagents();
+				const cmd = subagentService.parseUserCommand(processedMessage);
+				if (cmd) {
+					progress({
+						kind: 'progressMessage',
+						content: new MarkdownString('🤖 正在调用子代理...')
+					});
+					const subagentResult = await subagentService.runExplicitSubagent(cmd, context);
+					progress({
+						kind: 'markdownContent',
+						content: new MarkdownString(
+							`## Subagent: ${subagentResult.agentName}\n\n` +
+							`- Agent ID: \`${subagentResult.agentId}\`\n` +
+							`- Session: \`${subagentResult.sessionId}\`\n\n` +
+							`${subagentResult.content}`
+						)
+					});
+					return {};
+				}
+			}
+
+			// 每次提问都先用 GLM-5 做任务分析，再自动分配子代理/模型
+			const routingPlan = await glmService.analyzeTaskAndRoute(processedMessage, context, chatMode, isAgentMode);
+			selectedModel = routingPlan.model;
+			selectedMaxTokens = routingPlan.maxTokens;
+			enableThinking = routingPlan.enableThinking;
+			enableWebSearch = routingPlan.enableWebSearch;
+			this.logService.info(
+				`[AI Core Router] subAgent=${routingPlan.subAgent}, complexity=${routingPlan.complexity}, model=${routingPlan.model}, thinking=${routingPlan.enableThinking}, webSearch=${routingPlan.enableWebSearch}, maxTokens=${routingPlan.maxTokens}, confidence=${routingPlan.confidence}, reason=${routingPlan.reason}`
+			);
+
+			// 反循环强制策略：
+			// 当用户明确要求“继续/自动往下执行”且存在未完成 Spec 任务时，
+			// 直接进入 Autopilot 任务执行阶段，不再与用户反复拉扯。
+			const specModeServiceForForce = this.instantiationService.invokeFunction(accessor => {
+				try {
+					return accessor.get(ISpecModeService);
+				} catch {
+					return undefined;
+				}
+			});
+			const executionMode = this.configurationService.getValue<'autopilot' | 'supervised'>('aiCore.executionMode') || 'autopilot';
+			if (
+				specModeServiceForForce &&
+				executionMode === 'autopilot' &&
+				(this.shouldForceAutopilotResume(processedMessage) || this.shouldAutopilotImmediateTakeover(processedMessage))
+			) {
+				const active = specModeServiceForForce.getCurrentSession();
+				const pendingTasks = active?.tasks.filter(t => t.status === 'pending' || t.status === 'blocked') || [];
+				if (active && pendingTasks.length > 0) {
+					const fuse = this.evaluateAutopilotFuse(chatSessionKey, processedMessage, active.tasks);
+					const immediateTakeover = this.shouldAutopilotImmediateTakeover(processedMessage);
+					const forceStrongModel = this.isStuckOrLoopMessage(processedMessage) || fuse.triggered || immediateTakeover;
+					if (!immediateTakeover && !fuse.triggered && !this.isStuckOrLoopMessage(processedMessage)) {
+						// 首次催促只记录状态，不立即熔断，避免误触发。
+						this.logService.info(`[AI Core Autopilot Fuse] nudge=${fuse.nudgeCount}, waiting for next confirmation`);
+					}
+					progress({
+						kind: 'markdownContent',
+						content: new MarkdownString(
+							`## 🚀 强制 Autopilot 执行\n\n` +
+							`检测到执行意图，已跳过对话拉扯并直接执行剩余任务。\n\n` +
+							`${forceStrongModel ? '⚡ 触发防呆熔断器，本轮已强制切换最强模型 **glm-5**。\n\n' : ''}`
+						)
+					});
+					await this.executeSpecTasksWithAutopilotWorkers(
+						pendingTasks,
+						context,
+						specModeServiceForForce,
+						agentToolService,
+						progress,
+						glmService,
+						forceStrongModel
+					);
+					this.resetAutopilotFuse(chatSessionKey);
+					return {};
+				}
+			}
+
+			// 自动子代理委派（仅在 Vibe 常规对话中启用，Spec 流程保持原逻辑）
+			if (subagentService?.isEnabled() && chatMode === 'vibe') {
+				try {
+					progress({
+						kind: 'progressMessage',
+						content: new MarkdownString(`🧠 已路由到子代理：${routingPlan.subAgent}，正在分析...`)
+					});
+					const delegated = await subagentService.runRoutedSubagent(
+						routingPlan.subAgent,
+						processedMessage,
+						context,
+						{
+							model: selectedModel,
+							enableThinking,
+							enableWebSearch,
+							maxTokens: selectedMaxTokens
+						}
+					);
+					subagentDelegationContext =
+						`## Subagent Analysis\n` +
+						`- name: ${delegated.agentName}\n` +
+						`- agentId: ${delegated.agentId}\n` +
+						`- sessionId: ${delegated.sessionId}\n\n` +
+						`${delegated.content.slice(0, 4000)}`;
+				} catch (subErr) {
+					this.logService.warn(`[AI Core Subagent] Delegation failed, fallback to main flow: ${String(subErr)}`);
+				}
+			}
 
 			// Spec 模式特殊处理
 			if (chatMode === 'spec') {
@@ -661,10 +817,13 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 				this.logService.warn('[AI Core GLM] SpecModeService not available');
 			}
 
-			// 构建用户消息（包含 # 上下文 + Spec 上下文）
+			// 构建用户消息（包含 # 上下文 + Spec 上下文 + 子代理分析）
 			let finalUserMessage = processedMessage;
-			if (additionalContext || specContext) {
+			if (additionalContext || specContext || subagentDelegationContext) {
 				let contextParts = '';
+				if (subagentDelegationContext) {
+					contextParts += `\n\n${subagentDelegationContext}`;
+				}
 				if (specContext) {
 					contextParts += `\n\n## 当前项目状态\n${specContext}`;
 				}
@@ -690,73 +849,15 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			// 使用带会话上下文的流式聊天（利用智谱 AI 上下文缓存）
 			this.logService.info(`[AI Core GLM] Using session: ${currentSession.id} with ${currentSession.messages.length} history messages`);
 
-			// 工具调用续接循环
-			const maxToolIterations = 10; // 最大工具调用迭代次数
-			let toolIteration = 0;
-			let isFirstIteration = true;
-
-			while (toolIteration < maxToolIterations) {
-				toolIteration++;
-
-				if (isFirstIteration) {
-					// 首次迭代：发送用户消息
-					for await (const event of glmService.streamChatWithSession(finalUserMessage, context, {
-						tools,
-						enableThinking,
-						enableWebSearch,
-						sessionId: currentSession.id
-					}, undefined)) {
-						await responseHandler.handleEvent(event);
-					}
-					isFirstIteration = false;
-				} else {
-					// 续接迭代：发送工具结果
-					const toolResults = responseHandler.getPendingToolResults();
-					if (toolResults.length === 0) {
-						break;
-					}
-
-					this.logService.info(`[AI Core GLM] Tool continuation iteration ${toolIteration}, ${toolResults.length} tool results`);
-
-					// 将工具结果添加到会话
-					for (const toolResult of toolResults) {
-						glmService.addMessage(currentSession.id, {
-							role: 'tool',
-							tool_call_id: toolResult.toolCallId,
-							content: toolResult.result
-						});
-					}
-
-					// 清除已处理的工具结果
-					responseHandler.clearPendingToolResults();
-
-					// 继续对话（不发送用户消息，只发送工具结果后让模型继续）
-					for await (const event of glmService.streamChatWithSession('', context, {
-						tools,
-						enableThinking: false, // 续接时不需要思考
-						enableWebSearch: false, // 续接时不需要联网
-						sessionId: currentSession.id,
-						skipUserMessage: true // 跳过用户消息，只续接
-					}, undefined)) {
-						await responseHandler.handleEvent(event);
-					}
-				}
-
-				// 检查是否还有工具调用需要处理
-				if (!responseHandler.hasToolCalls) {
-					this.logService.info(`[AI Core GLM] No more tool calls, ending iteration loop`);
-					break;
-				}
-
-				this.logService.info(`[AI Core GLM] Has tool calls, continuing to iteration ${toolIteration + 1}`);
-			}
-
-			if (toolIteration >= maxToolIterations) {
-				this.logService.warn(`[AI Core GLM] Reached max tool iterations (${maxToolIterations})`);
-				progress({
-					kind: 'warning',
-					content: new MarkdownString('⚠️ 工具调用次数已达上限，请继续提问以完成任务。')
-				});
+			for await (const event of glmService.streamChatWithSession(finalUserMessage, context, {
+				tools,
+				model: selectedModel,
+				enableThinking,
+				enableWebSearch,
+				maxTokens: selectedMaxTokens,
+				sessionId: currentSession.id
+			}, undefined)) {
+				await responseHandler.handleEvent(event);
 			}
 
 			// 显示缓存统计（调试信息）
@@ -775,6 +876,351 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 
 		return {};
+	}
+
+	private async ensureProjectSkills(userMessage: string, progress: (part: IChatProgress) => void): Promise<void> {
+		const workspaceService = this.instantiationService.invokeFunction(accessor => accessor.get(IWorkspaceContextService));
+		const fileService = this.instantiationService.invokeFunction(accessor => accessor.get(IFileService));
+		const roots = workspaceService.getWorkspace().folders;
+		if (roots.length === 0) {
+			return;
+		}
+
+		const root = roots[0].uri;
+		const profile = await this.collectProjectProfile(root, fileService);
+		const projectSlug = this.toSkillId(profile.rootName);
+		const skillsRoot = await this.pickSkillsRoot(root, fileService);
+		const generatedFolders = [
+			`${projectSlug}-architecture`,
+			`${projectSlug}-coding`,
+			`${projectSlug}-testing`
+		];
+
+		// 当前项目已存在分层 skills 则跳过
+		if (await this.hasGeneratedProjectSkills(fileService, skillsRoot, generatedFolders)) {
+			return;
+		}
+
+		progress({
+			kind: 'progressMessage',
+			content: new MarkdownString(`🧠 检测到项目缺少项目级 Skills，正在自动生成（${skillsRoot.path}）...`)
+		});
+
+		const isNewProject = profile.sourceFiles <= 8;
+		const architectureFolder = URI.joinPath(skillsRoot, `${projectSlug}-architecture`);
+		const codingFolder = URI.joinPath(skillsRoot, `${projectSlug}-coding`);
+		const testingFolder = URI.joinPath(skillsRoot, `${projectSlug}-testing`);
+		const scanRefFile = URI.joinPath(architectureFolder, 'references', 'PROJECT_SCAN.md');
+
+		await fileService.createFolder(architectureFolder);
+		await fileService.createFolder(codingFolder);
+		await fileService.createFolder(testingFolder);
+
+		await fileService.writeFile(
+			URI.joinPath(architectureFolder, 'SKILL.md'),
+			VSBuffer.fromString(this.buildArchitectureSkillMarkdown(profile, userMessage, isNewProject, projectSlug))
+		);
+		await fileService.writeFile(
+			URI.joinPath(codingFolder, 'SKILL.md'),
+			VSBuffer.fromString(this.buildCodingSkillMarkdown(profile, isNewProject, projectSlug))
+		);
+		await fileService.writeFile(
+			URI.joinPath(testingFolder, 'SKILL.md'),
+			VSBuffer.fromString(this.buildTestingSkillMarkdown(profile, isNewProject, projectSlug))
+		);
+
+		// 旧项目深度扫描报告（供 architecture skill 参考）
+		if (!isNewProject) {
+			await fileService.createFolder(URI.joinPath(architectureFolder, 'references'));
+			const scanDoc = this.buildProjectScanReference(profile);
+			await fileService.writeFile(scanRefFile, VSBuffer.fromString(scanDoc));
+		}
+
+		this.logService.info(`[AI Core Skills] Generated layered project skills under: ${skillsRoot.fsPath}`);
+		progress({
+			kind: 'progressMessage',
+			content: new MarkdownString(`✅ 已自动生成分层 Skills（${projectSlug}-architecture / coding / testing）`)
+		});
+	}
+
+	private async pickSkillsRoot(root: URI, fileService: IFileService): Promise<URI> {
+		const agentsRoot = URI.joinPath(root, '.agents', 'skills');
+		const cursorRoot = URI.joinPath(root, '.cursor', 'skills');
+
+		// 优先使用中立目录 .agents/skills；如果历史项目已存在 .cursor/skills 则兼容复用
+		try {
+			await fileService.resolve(agentsRoot);
+			return agentsRoot;
+		} catch {
+			// continue
+		}
+
+		try {
+			await fileService.resolve(cursorRoot);
+			return cursorRoot;
+		} catch {
+			// continue
+		}
+
+		return agentsRoot;
+	}
+
+	private async hasGeneratedProjectSkills(fileService: IFileService, skillsRoot: URI, folderNames: string[]): Promise<boolean> {
+		for (const folderName of folderNames) {
+			try {
+				const stat = await fileService.resolve(URI.joinPath(skillsRoot, folderName, 'SKILL.md'));
+				if (!stat.isDirectory) {
+					return true;
+				}
+			} catch {
+				// continue
+			}
+		}
+		return false;
+	}
+
+	private async collectProjectProfile(root: URI, fileService: IFileService): Promise<{
+		rootName: string;
+		topLevelEntries: string[];
+		sourceFiles: number;
+		majorDirs: string[];
+		stackHints: string[];
+		topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }>;
+	}> {
+		let topLevelEntries: string[] = [];
+		let sourceFiles = 0;
+		const stackHints = new Set<string>();
+		let topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }> = [];
+
+		try {
+			const stat = await fileService.resolve(root);
+			topLevelEntries = (stat.children || []).map(c => c.name).slice(0, 40);
+
+			for (const child of stat.children || []) {
+				const name = child.name.toLowerCase();
+				if (name === 'package.json') {
+					stackHints.add('Node.js/TypeScript');
+				}
+				if (name === 'pubspec.yaml') {
+					stackHints.add('Flutter/Dart');
+				}
+				if (name === 'requirements.txt' || name === 'pyproject.toml') {
+					stackHints.add('Python');
+				}
+				if (name === 'pom.xml') {
+					stackHints.add('Java/Maven');
+				}
+				if (name === 'go.mod') {
+					stackHints.add('Go');
+				}
+				if (name === 'cargo.toml') {
+					stackHints.add('Rust');
+				}
+			}
+
+			const topLevelDirs = (stat.children || []).filter(c => c.isDirectory).slice(0, 20);
+			topLevelDirSourceCounts = await Promise.all(
+				topLevelDirs.map(async d => ({
+					name: d.name,
+					sourceFiles: await this.countSourceFiles(d.resource, fileService, 3, 200)
+				}))
+			);
+			topLevelDirSourceCounts.sort((a, b) => b.sourceFiles - a.sourceFiles);
+		} catch {
+			// ignore
+		}
+
+		const majorDirs = topLevelEntries.filter(n => ['src', 'app', 'lib', 'services', 'backend', 'frontend', 'test', 'tests'].includes(n.toLowerCase()));
+		sourceFiles = await this.countSourceFiles(root, fileService, 4, 400);
+
+		return {
+			rootName: root.path.split('/').pop() || 'project',
+			topLevelEntries,
+			sourceFiles,
+			majorDirs,
+			stackHints: Array.from(stackHints),
+			topLevelDirSourceCounts
+		};
+	}
+
+	private async countSourceFiles(root: URI, fileService: IFileService, maxDepth: number, maxFiles: number): Promise<number> {
+		let count = 0;
+		const exts = /\.(ts|tsx|js|jsx|py|java|go|rs|dart|swift|kt|c|cpp|cs|php|rb|vue|html|css|scss|sql|md)$/i;
+
+		const walk = async (dir: URI, depth: number): Promise<void> => {
+			if (depth > maxDepth || count >= maxFiles) {
+				return;
+			}
+			let stat;
+			try {
+				stat = await fileService.resolve(dir);
+			} catch {
+				return;
+			}
+			for (const child of stat.children || []) {
+				const name = child.name.toLowerCase();
+				if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'out' || name === 'build') {
+					continue;
+				}
+				if (child.isDirectory) {
+					await walk(child.resource, depth + 1);
+				} else if (exts.test(child.name)) {
+					count++;
+					if (count >= maxFiles) {
+						return;
+					}
+				}
+			}
+		};
+
+		await walk(root, 0);
+		return count;
+	}
+
+	private buildArchitectureSkillMarkdown(
+		profile: { rootName: string; topLevelEntries: string[]; sourceFiles: number; majorDirs: string[]; stackHints: string[]; topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }> },
+		userMessage: string,
+		isNewProject: boolean,
+		projectSlug: string
+	): string {
+		const stack = profile.stackHints.length > 0 ? profile.stackHints.join(' / ') : '待识别';
+		const dirs = profile.majorDirs.length > 0 ? profile.majorDirs.join(', ') : '（暂无明显业务目录）';
+		const top = profile.topLevelEntries.slice(0, 20).join(', ');
+		const projectType = isNewProject ? '新项目' : '存量项目';
+		const hotDirs = profile.topLevelDirSourceCounts
+			.filter(item => item.sourceFiles > 0)
+			.slice(0, 8)
+			.map(item => `${item.name}(${item.sourceFiles})`)
+			.join(', ') || 'N/A';
+
+		return `---
+name: ${projectSlug}-architecture
+description: 项目架构分析与方案选择技能。适用于需求澄清、架构决策与实施路径设计。
+---
+
+# ${profile.rootName} Architecture Skill
+
+## 项目画像
+- 项目名称: ${profile.rootName}
+- 项目类型: ${projectType}
+- 代码规模(估算): ${profile.sourceFiles} 个源文件
+- 技术栈线索: ${stack}
+- 核心目录: ${dirs}
+- 高活跃目录(源文件数): ${hotDirs}
+- 顶层结构: ${top}
+
+## 使用时机
+- 用户提出新需求，需要先分析需求再落地实现
+- 用户询问架构选择、技术方案对比、任务分解
+- 进行跨文件改造或多步骤开发时
+
+## 指令
+- 先输出「需求澄清 + 目标边界 + 验收标准」三段摘要
+- 若为新项目，先给出推荐架构与目录规范，再拆分里程碑任务
+- 若为存量项目，先结合 references/PROJECT_SCAN.md 做模块复用评估，再给最小改动路径
+- 实施前给出 1-3 个方案并说明 trade-off（性能、成本、复杂度）
+- 执行时按任务顺序推进，并在每步后更新进度与风险
+
+## 当前用户上下文
+- 最近用户需求: ${userMessage.slice(0, 400)}
+
+## 输出格式
+1. 需求分析
+2. 架构方案（含优缺点）
+3. 实施任务清单（可执行）
+4. 风险与回滚计划
+`;
+	}
+
+	private buildCodingSkillMarkdown(
+		profile: { rootName: string; topLevelEntries: string[]; sourceFiles: number; majorDirs: string[]; stackHints: string[]; topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }> },
+		isNewProject: boolean,
+		projectSlug: string
+	): string {
+		const projectType = isNewProject ? '新项目' : '存量项目';
+		const stack = profile.stackHints.length > 0 ? profile.stackHints.join(' / ') : '待识别';
+		return `---
+name: ${projectSlug}-coding
+description: 项目编码实施技能。适用于按任务落地、模块实现、重构与错误修复。
+---
+
+# ${profile.rootName} Coding Skill
+
+## 项目上下文
+- 项目类型: ${projectType}
+- 技术栈线索: ${stack}
+- 优先复用目录: ${profile.majorDirs.join(', ') || '请先扫描确定'}
+
+## 指令
+- 先确认变更范围，优先最小改动并保持兼容
+- 涉及跨模块改动时，先列出依赖关系和影响面
+- 对复杂逻辑添加简洁注释，避免冗长注释
+- 改动后优先执行与当前变更直接相关的校验与编译
+- 发现风险时先反馈，再继续扩展改造
+
+## 输出格式
+1. 实施步骤
+2. 关键改动点
+3. 验证结果
+4. 后续建议
+`;
+	}
+
+	private buildTestingSkillMarkdown(
+		profile: { rootName: string; topLevelEntries: string[]; sourceFiles: number; majorDirs: string[]; stackHints: string[]; topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }> },
+		isNewProject: boolean,
+		projectSlug: string
+	): string {
+		const projectType = isNewProject ? '新项目' : '存量项目';
+		return `---
+name: ${projectSlug}-testing
+description: 项目测试与质量保障技能。适用于测试策略、回归验证与风险兜底。
+---
+
+# ${profile.rootName} Testing Skill
+
+## 项目上下文
+- 项目类型: ${projectType}
+- 规模估算: ${profile.sourceFiles} 个源文件
+
+## 指令
+- 按“核心流程 > 边界条件 > 回归风险”组织测试计划
+- 先覆盖本次变更直接影响的功能，再扩展关联路径
+- 对失败用例给出可复现步骤和定位线索
+- 无法本地执行的测试要明确标注阻塞原因和替代验证
+- 输出风险分级（高/中/低）及上线建议
+
+## 输出格式
+1. 测试范围
+2. 用例清单
+3. 执行结果
+4. 风险评估
+`;
+	}
+
+	private buildProjectScanReference(profile: { rootName: string; topLevelEntries: string[]; sourceFiles: number; majorDirs: string[]; stackHints: string[]; topLevelDirSourceCounts: Array<{ name: string; sourceFiles: number }> }): string {
+		return `# PROJECT_SCAN
+
+## Summary
+- root: ${profile.rootName}
+- sourceFiles(estimated): ${profile.sourceFiles}
+- stackHints: ${profile.stackHints.join(', ') || 'N/A'}
+- majorDirs: ${profile.majorDirs.join(', ') || 'N/A'}
+
+## Top-level entries
+${profile.topLevelEntries.map(e => `- ${e}`).join('\n')}
+
+## Top-level directory source counts
+${profile.topLevelDirSourceCounts.map(e => `- ${e.name}: ${e.sourceFiles}`).join('\n') || '- N/A'}
+`;
+	}
+
+	private toSkillId(input: string): string {
+		const normalized = input
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '-')
+			.replace(/^-+|-+$/g, '');
+		return normalized || 'project';
 	}
 
 	/**
@@ -918,51 +1364,15 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
 		let completedTasks = 0;
 		const totalTasks = tasks.length;
-
-		for (const task of tasks) {
-			// 显示当前任务
-			progress({
-				kind: 'markdownContent',
-				content: new MarkdownString(`### ▶️ 执行任务 ${completedTasks + 1}/${totalTasks}: ${task.title}\n\n`)
-			});
-
-			try {
-				// 使用 Agent 工具执行任务
-				const result = await this.executeTaskWithAgent(task, context, agentToolService, glmService, progress);
-
-				if (result.success) {
-					completedTasks++;
-					progress({
-						kind: 'markdownContent',
-						content: new MarkdownString(`✅ 完成: ${result.summary}\n\n`)
-					});
-
-					// 显示创建的文件
-					if (result.filesCreated && result.filesCreated.length > 0) {
-						let filesContent = '📁 **创建的文件**:\n';
-						for (const file of result.filesCreated) {
-							filesContent += `- \`${file}\`\n`;
-						}
-						progress({
-							kind: 'markdownContent',
-							content: new MarkdownString(filesContent + '\n')
-						});
-					}
-				} else {
-					progress({
-						kind: 'markdownContent',
-						content: new MarkdownString(`⚠️ 任务未完成: ${result.error || '未知错误'}\n\n`)
-					});
-				}
-			} catch (error) {
-				progress({
-					kind: 'markdownContent',
-					content: new MarkdownString(`❌ 执行失败: ${String(error)}\n\n`)
-				});
-			}
-
-			await this.delay(50);
-		}
+		completedTasks = await this.executeSpecTasksWithAutopilotWorkers(
+			tasks,
+			context,
+			specService,
+			agentToolService,
+			progress,
+			glmService,
+			false
+		);
 
 		// ============= 完成总结 =============
 		const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1001,7 +1411,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		context: GLMChatContext,
 		agentToolService: IAgentToolService,
 		glmService: IGLMChatService,
-		progress: (part: IChatProgress) => void
+		progress: (part: IChatProgress) => void,
+		additionalGuidance?: string,
+		taskRouting?: GLMTaskRoutingPlan
 	): Promise<{ success: boolean; summary: string; filesCreated?: string[]; error?: string }> {
 		const filesCreated: string[] = [];
 
@@ -1017,6 +1429,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 1. 生成完整可用的代码
 2. 包含必要的注释
 3. 遵循最佳实践
+${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : ''}
 
 ## 输出格式
 请以 JSON 格式返回：
@@ -1042,7 +1455,12 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 				async () => {
 					// 收集 LLM 响应
 					let responseContent = '';
-					for await (const event of glmService.streamChat(messages, context, { maxTokens: 16384 })) {
+					for await (const event of glmService.streamChat(messages, context, {
+						model: taskRouting?.model,
+						maxTokens: taskRouting?.maxTokens || 16384,
+						enableThinking: taskRouting ? taskRouting.enableThinking : true,
+						enableWebSearch: taskRouting ? taskRouting.enableWebSearch : true
+					})) {
 						if (event.type === 'content' && event.content) {
 							responseContent += event.content;
 						}
@@ -1117,6 +1535,194 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 	}
 
+	private async executeSpecTasksWithAutopilotWorkers(
+		tasks: SpecTask[],
+		context: GLMChatContext,
+		specService: ISpecModeService,
+		agentToolService: IAgentToolService,
+		progress: (part: IChatProgress) => void,
+		glmService: IGLMChatService,
+		forceStrongModel: boolean
+	): Promise<number> {
+		let completedTasks = 0;
+		let finishedTasks = 0;
+		const totalTasks = tasks.length;
+		const subagentService = this.instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(ISubagentOrchestratorService);
+			} catch {
+				return undefined;
+			}
+		});
+		const parallelEnabled = this.configurationService.getValue<boolean>('aiCore.enableParallelTaskExecution') !== false;
+		const configuredParallel = this.configurationService.getValue<number>('aiCore.maxParallelSubagents') || 3;
+		const maxConcurrentByProviderLimit = 3; // GLM 官方并发限制兜底
+		const workerCount = Math.max(1, Math.min(maxConcurrentByProviderLimit, parallelEnabled ? configuredParallel : 1));
+		if ((parallelEnabled ? configuredParallel : 1) > maxConcurrentByProviderLimit) {
+			this.logService.warn(`[AI Core Autopilot] Parallel workers reduced to ${maxConcurrentByProviderLimit} due to GLM concurrency limit`);
+		}
+
+		progress({
+			kind: 'progressMessage',
+			content: new MarkdownString(
+				`🤖 任务执行模式：${workerCount > 1 ? `并行子代理 x${workerCount}` : '串行执行'}（每任务 GLM-5 路由）` +
+				`${forceStrongModel ? ' ｜ ⚡ 强制 glm-5' : ''}`
+			)
+		});
+
+		let taskCursor = 0;
+		const worker = async (workerId: number): Promise<void> => {
+			while (true) {
+				const currentIndex = taskCursor++;
+				if (currentIndex >= tasks.length) {
+					return;
+				}
+
+				const task = tasks[currentIndex];
+				specService.startTask(task.id);
+				progress({
+					kind: 'markdownContent',
+					content: new MarkdownString(`### ▶️ [Worker-${workerId}] 执行任务 ${currentIndex + 1}/${totalTasks}: ${task.title}\n\n`)
+				});
+
+				try {
+					let subagentGuidance = '';
+					const routeInput = `${task.title}\n${task.description}`;
+					const routing = await glmService.analyzeTaskAndRoute(routeInput, context, 'spec', true, true);
+					const effectiveRouting: GLMTaskRoutingPlan = forceStrongModel
+						? {
+							...routing,
+							model: 'glm-5',
+							enableThinking: true,
+							enableWebSearch: true,
+							maxTokens: Math.max(32768, routing.maxTokens)
+						}
+						: routing;
+					const complexityLabel = effectiveRouting.complexity === 'simple' ? '简单任务' : effectiveRouting.complexity === 'medium' ? '一般任务' : '复杂任务';
+					progress({
+						kind: 'markdownContent',
+						content: new MarkdownString(
+							`> 🏷️ 任务分级：**${complexityLabel}** ｜ 🤖 执行模型：\`${effectiveRouting.model}\` ｜ 🧩 子代理：\`${effectiveRouting.subAgent}\`\n\n`
+						)
+					});
+
+					if (subagentService?.isEnabled()) {
+						const delegated = await subagentService.runRoutedSubagent(
+							effectiveRouting.subAgent,
+							`请为以下任务生成高质量执行建议（聚焦可落地步骤和风险点）：\n\n${routeInput}`,
+							context,
+							{
+								model: effectiveRouting.model,
+								enableThinking: effectiveRouting.enableThinking,
+								enableWebSearch: effectiveRouting.enableWebSearch,
+								maxTokens: effectiveRouting.maxTokens
+							}
+						);
+						subagentGuidance = delegated.content.slice(0, 3000);
+						progress({
+							kind: 'progressMessage',
+							content: new MarkdownString(`🧠 子代理 ${delegated.agentName} 已完成任务预分析`)
+						});
+					}
+
+					const result = await this.executeTaskWithAgent(task, context, agentToolService, glmService, progress, subagentGuidance, effectiveRouting);
+					if (result.success) {
+						completedTasks++;
+						specService.completeTask(task.id);
+						progress({
+							kind: 'markdownContent',
+							content: new MarkdownString(`✅ 完成: ${result.summary}\n\n`)
+						});
+						if (result.filesCreated && result.filesCreated.length > 0) {
+							let filesContent = '📁 **创建的文件**:\n';
+							for (const file of result.filesCreated) {
+								filesContent += `- \`${file}\`\n`;
+							}
+							progress({
+								kind: 'markdownContent',
+								content: new MarkdownString(filesContent + '\n')
+							});
+						}
+					} else {
+						specService.failTask(task.id, result.error || '任务执行失败');
+						progress({
+							kind: 'markdownContent',
+							content: new MarkdownString(`⚠️ 任务未完成: ${result.error || '未知错误'}\n\n`)
+						});
+					}
+				} catch (error) {
+					specService.failTask(task.id, String(error));
+					progress({
+						kind: 'markdownContent',
+						content: new MarkdownString(`❌ 执行失败: ${String(error)}\n\n`)
+					});
+				} finally {
+					finishedTasks++;
+					progress({
+						kind: 'progressMessage',
+						content: new MarkdownString(`📊 总体进度：${finishedTasks}/${totalTasks}，已完成 ${completedTasks}`)
+					});
+				}
+			}
+		};
+
+		await Promise.all(Array.from({ length: workerCount }, (_, i) => worker(i + 1)));
+		return completedTasks;
+	}
+
+	private shouldForceAutopilotResume(message: string): boolean {
+		const text = message.toLowerCase();
+		const patterns = [
+			'继续', '继续执行', '往下执行', '自动往下', '直接执行', '不要问',
+			'continue', 'keep going', 'go on', 'execute all', 'auto execute'
+		];
+		return patterns.some(p => text.includes(p));
+	}
+
+	private shouldAutopilotImmediateTakeover(message: string): boolean {
+		const text = message.toLowerCase();
+		const patterns = [
+			'运行', '启动', '报错', '错误', '修复', '卡住', '失败',
+			'run', 'start', 'dev', 'npm', 'error', 'fix', 'failed', 'broken'
+		];
+		return patterns.some(p => text.includes(p));
+	}
+
+	private isStuckOrLoopMessage(message: string): boolean {
+		const text = message.toLowerCase();
+		const patterns = ['循环', '卡住', '反复', '拉扯', '愚蠢', 'stuck', 'loop', 'repeat'];
+		return patterns.some(p => text.includes(p));
+	}
+
+	private evaluateAutopilotFuse(
+		sessionKey: string,
+		message: string,
+		tasks: SpecTask[]
+	): { triggered: boolean; nudgeCount: number } {
+		const pending = tasks.filter(t => t.status === 'pending' || t.status === 'blocked').length;
+		const completed = tasks.filter(t => t.status === 'completed').length;
+		const previous = this.autopilotFuseState.get(sessionKey) || { nudgeCount: 0, lastPending: pending, lastCompleted: completed };
+
+		const isNudge = this.shouldForceAutopilotResume(message);
+		const progressed = completed > previous.lastCompleted || pending < previous.lastPending;
+		let nudgeCount = progressed ? 0 : previous.nudgeCount;
+		if (isNudge) {
+			nudgeCount += 1;
+		}
+
+		this.autopilotFuseState.set(sessionKey, {
+			nudgeCount,
+			lastPending: pending,
+			lastCompleted: completed
+		});
+
+		return { triggered: nudgeCount >= 2, nudgeCount };
+	}
+
+	private resetAutopilotFuse(sessionKey: string): void {
+		this.autopilotFuseState.delete(sessionKey);
+	}
+
 	/**
 	 * 处理 Spec 模式的请求 - 根据当前阶段执行不同操作
 	 */
@@ -1176,20 +1782,16 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
 			const currentSession = specModeService.getCurrentSession();
 			if (currentSession) {
-				const pendingTasks = currentSession.tasks.filter(t => t.status === 'pending');
-				let completedCount = 0;
-
-				for (const task of pendingTasks) {
-					progress({
-						kind: 'progressMessage',
-						content: new MarkdownString(`🔄 执行任务 ${completedCount + 1}/${pendingTasks.length}: ${task.title}`)
-					});
-
-					const result = await specModeService.executeTaskWithLLM(task);
-					if (result.success) {
-						completedCount++;
-					}
-				}
+				const pendingTasks = currentSession.tasks.filter(t => t.status === 'pending' || t.status === 'blocked');
+				const completedCount = await this.executeSpecTasksWithAutopilotWorkers(
+					pendingTasks,
+					context,
+					specModeService,
+					agentToolService,
+					progress,
+					glmService,
+					false
+				);
 
 				progress({
 					kind: 'markdownContent',
@@ -1671,7 +2273,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			// 显示带可点击按钮的任务列表
 			const session = specService.getCurrentSession();
 			if (session) {
-				const content = this.formatTaskListWithButtons(session);
+				const content = this.getModeSelectionCard(session) + '\n\n' + this.formatTaskListWithButtons(session);
 				progress({
 					kind: 'markdownContent',
 					content: new MarkdownString(content, { isTrusted: true })
@@ -1684,39 +2286,45 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	// 模式选择卡片 (Kiro 风格)
 	// ============================================================================
 
-	private getModeSelectionCard(): string {
-		return `# 🎯 选择你的工作模式
+	private getModeSelectionCard(session?: SpecSession): string {
+		const hasSession = Boolean(session);
+		const completed = session?.tasks.filter(t => t.status === 'completed').length || 0;
+		const total = session?.tasks.length || 0;
+		const pending = Math.max(0, total - completed);
+		const progressPercent = total > 0 ? Math.round((completed / total) * 100) : 0;
+		const sessionBlock = hasSession ? `
+---
+
+## 📌 Spec 工作台（同页）
+
+| 项目 | 状态 |
+|------|------|
+| 会话 | \`${session?.id}\` |
+| 阶段 | ${session?.phase} |
+| 任务进度 | ${completed}/${total}（${progressPercent}%） |
+| 待执行 | ${pending} |
+
+> 输入 **"继续"** 可直接执行下一个任务；输入 **"执行所有"** 可并行自动执行。
+` : '';
+
+		return `# ✨ Let's build
+
+同一个 Chat 页面内完成 **Vibe / Spec** 全流程（不再拆分多个顶部入口）。
+
+## 💬 Vibe
+- Chat first, then build
+- 适合快速探索、调试、迭代实现
+- 输入 \`vibe\` 切换
+
+## 📋 Spec
+- Plan first, then build
+- 自动生成 requirements / design / tasks 并执行
+- 输入 \`spec\` 切换
+${sessionBlock}
 
 ---
 
-## 💬 Vibe 模式
-**边聊边做，快速迭代**
-
-适合：
-- 🚀 快速探索和测试想法
-- 🔧 需求不明确时迭代开发
-- 🐛 调试和修复问题
-
-**输入 \`vibe\` 开始**
-
----
-
-## 📋 Spec 模式
-**先规划，后执行**
-
-适合：
-- 📊 需要深入思考的功能
-- 📝 需要结构化规划的项目
-- 👥 团队协作开发
-
-**输入 \`spec\` 开始**
-
----
-
-> 💡 **快捷命令**:
-> - 输入 \`vibe\` 或 \`spec\` 切换模式
-> - 使用 \`Ctrl+Shift+M\` 快速切换
-> - 在 Spec 模式中输入 "生成规格说明" 开始规划`;
+> 💡 快捷：\`vibe\` / \`spec\` / \`继续\` / \`执行所有\` / \`检查完成\``;
 	}
 
 	/**

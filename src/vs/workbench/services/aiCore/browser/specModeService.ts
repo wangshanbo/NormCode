@@ -220,6 +220,8 @@ export interface ISpecModeService {
 	generateTasks(stories: UserStory[], design: TechnicalDesign): Promise<SpecTask[]>;
 	startTask(taskId: string): void;
 	completeTask(taskId: string): void;
+	failTask(taskId: string, reason?: string): void;
+	retryTask(taskId: string): void;
 	getNextTask(): SpecTask | undefined;
 
 	// 获取当前上下文用于 prompt
@@ -475,6 +477,7 @@ export class SpecModeService extends Disposable implements ISpecModeService {
 		};
 
 		try {
+			await this.fileService.createFolder(specFolder);
 			const manifestUri = URI.joinPath(specFolder, 'manifest.json');
 			await this.fileService.writeFile(manifestUri, VSBuffer.fromString(JSON.stringify(manifest, null, 2)));
 			this.logService.info(`[SpecModeService] Saved manifest to ${manifestUri.fsPath}`);
@@ -924,6 +927,7 @@ ${componentsSummary}
 			task.status = 'in_progress';
 			this._currentSession.updatedAt = new Date();
 			this._onDidUpdateSession.fire(this._currentSession);
+			this.persistTaskState().catch(() => { /* ignore */ });
 		}
 	}
 
@@ -945,8 +949,39 @@ ${componentsSummary}
 			}
 
 			this._onDidUpdateSession.fire(this._currentSession);
-			// P0.4 - 自动保存会话状态
-			this.saveSessionState().catch(() => { /* 静默失败 */ });
+			this.persistTaskState().catch(() => { /* ignore */ });
+		}
+	}
+
+	failTask(taskId: string, reason?: string): void {
+		if (!this._currentSession) {
+			return;
+		}
+
+		const task = this._currentSession.tasks.find(t => t.id === taskId);
+		if (task) {
+			task.status = 'blocked';
+			if (reason) {
+				task.result = reason;
+			}
+			this._currentSession.updatedAt = new Date();
+			this._onDidUpdateSession.fire(this._currentSession);
+			this.persistTaskState().catch(() => { /* ignore */ });
+		}
+	}
+
+	retryTask(taskId: string): void {
+		if (!this._currentSession) {
+			return;
+		}
+
+		const task = this._currentSession.tasks.find(t => t.id === taskId);
+		if (task) {
+			task.status = 'pending';
+			task.result = undefined;
+			this._currentSession.updatedAt = new Date();
+			this._onDidUpdateSession.fire(this._currentSession);
+			this.persistTaskState().catch(() => { /* ignore */ });
 		}
 	}
 
@@ -1089,6 +1124,7 @@ ${componentsSummary}
 
 		const session = this._currentSession;
 		const specFolder = URI.joinPath(this._specsFolder, session.id);
+		await this.fileService.createFolder(specFolder);
 
 		// 生成用户故事内容 (EARS 格式)
 		let storiesContent = '';
@@ -1164,6 +1200,7 @@ ${componentsSummary}
 		const session = this._currentSession;
 		const design = session.technicalDesign!;
 		const specFolder = URI.joinPath(this._specsFolder, session.id);
+		await this.fileService.createFolder(specFolder);
 
 		// 生成组件内容（表格格式）
 		let componentsContent = '| 组件 | 职责 | 接口 | 依赖 |\n|------|------|------|------|\n';
@@ -1207,6 +1244,7 @@ ${componentsSummary}
 
 		const session = this._currentSession;
 		const specFolder = URI.joinPath(this._specsFolder, session.id);
+		await this.fileService.createFolder(specFolder);
 
 		const completed = session.tasks.filter(t => t.status === 'completed').length;
 		const inProgress = session.tasks.filter(t => t.status === 'in_progress').length;
@@ -1227,6 +1265,8 @@ ${componentsSummary}
 				task.status === 'blocked' ? '🚫' : '⏳';
 			const checkbox = task.status === 'completed' ? '[x]' : '[ ]';
 
+			// 为编辑器 CodeLens 提供稳定锚点（Kiro 风格任务按钮）
+			tasksContent += `<!-- task-id:${task.id} -->\n`;
 			tasksContent += `### ${checkbox} ${task.title} ${statusIcon}\n\n`;
 			tasksContent += `| 属性 | 值 |\n|------|----|\n`;
 			tasksContent += `| 类型 | ${this.getTaskTypeLabel(task.type)} |\n`;
@@ -1275,6 +1315,15 @@ ${componentsSummary}
 			'review': '👀 审查'
 		};
 		return labels[type] || type;
+	}
+
+	/**
+	 * 任务状态落盘：优先更新 tasks.md，再保存会话/manifest
+	 * 这样文件树和任务文件能第一时间同步
+	 */
+	private async persistTaskState(): Promise<void> {
+		await this.saveTasksFile();
+		await this.saveSessionState();
 	}
 
 	async loadSpecFromFolder(folder: URI): Promise<boolean> {

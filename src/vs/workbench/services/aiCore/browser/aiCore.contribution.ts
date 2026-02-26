@@ -46,8 +46,70 @@ configurationRegistry.registerConfiguration({
 		'aiCore.glmModel': {
 			type: 'string',
 			default: 'glm-4.7',
-			enum: ['glm-4.7', 'glm-4-plus', 'glm-4-air', 'glm-4-flash'],
+			enum: ['glm-5', 'glm-4.7', 'glm-4.5-air', 'glm-4.7-flash', 'glm-4.6v', 'glm-4.6v-flashx', 'glm-4.6v-flash', 'glm-4-plus', 'glm-4-air', 'glm-4-flash'],
 			description: localize('aiCore.glmModel', 'GLM model to use')
+		},
+		'aiCore.enableAutoModelRouting': {
+			type: 'boolean',
+			default: true,
+			description: localize('aiCore.enableAutoModelRouting', 'Use GLM-5 as a pre-router to auto-analyze task complexity and assign sub-agent/model for each user query')
+		},
+		'aiCore.routingModelSimple': {
+			type: 'string',
+			default: 'glm-4.7-flash',
+			description: localize('aiCore.routingModelSimple', 'Model used for simple tasks (quick responder sub-agent)')
+		},
+		'aiCore.routingModelMedium': {
+			type: 'string',
+			default: 'glm-4.7',
+			description: localize('aiCore.routingModelMedium', 'Model used for medium tasks (implementation sub-agent)')
+		},
+		'aiCore.routingModelHard': {
+			type: 'string',
+			default: 'glm-5',
+			description: localize('aiCore.routingModelHard', 'Model used for hard tasks (planning sub-agent)')
+		},
+		'aiCore.enableVisionRouting': {
+			type: 'boolean',
+			default: true,
+			description: localize('aiCore.enableVisionRouting', 'Enable visual-task detection and automatic routing to GLM-4.6V series models when image/video/document understanding is needed')
+		},
+		'aiCore.enableSubagents': {
+			type: 'boolean',
+			default: true,
+			description: localize('aiCore.enableSubagents', 'Enable subagent orchestration (auto delegation, explicit /agent invocation, and resume agent workflows)')
+		},
+		'aiCore.enableParallelTaskExecution': {
+			type: 'boolean',
+			default: true,
+			description: localize('aiCore.enableParallelTaskExecution', 'Enable parallel subagent workers in Autopilot task execution')
+		},
+		'aiCore.enableLegacySideViews': {
+			type: 'boolean',
+			default: false,
+			description: localize('aiCore.enableLegacySideViews', 'Show legacy AI CHAT/SPECS side views (disabled by default to keep single Chat entry)')
+		},
+		'aiCore.maxParallelSubagents': {
+			type: 'number',
+			default: 3,
+			minimum: 1,
+			maximum: 3,
+			description: localize('aiCore.maxParallelSubagents', 'Maximum parallel subagent workers for Autopilot execution (1-3, GLM API concurrency limit)')
+		},
+		'aiCore.routingVisionModelSimple': {
+			type: 'string',
+			default: 'glm-4.6v-flash',
+			description: localize('aiCore.routingVisionModelSimple', 'Vision model for simple visual tasks')
+		},
+		'aiCore.routingVisionModelMedium': {
+			type: 'string',
+			default: 'glm-4.6v-flashx',
+			description: localize('aiCore.routingVisionModelMedium', 'Vision model for medium visual tasks')
+		},
+		'aiCore.routingVisionModelHard': {
+			type: 'string',
+			default: 'glm-4.6v',
+			description: localize('aiCore.routingVisionModelHard', 'Vision model for hard visual tasks')
 		},
 		'aiCore.agentMode': {
 			type: 'boolean',
@@ -112,6 +174,7 @@ configurationRegistry.registerConfiguration({
 // Import services
 import { IAgentToolService } from './agentToolService.js';
 import './agentToolService.js'; // Ensure it's registered
+import './subagentOrchestratorService.js'; // Ensure it's registered
 import { ICodeIndexService } from './codeIndexService.js';
 import './codeIndexService.js'; // Ensure it's registered
 
