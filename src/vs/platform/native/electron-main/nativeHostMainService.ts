@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { app, BrowserWindow, clipboard, contentTracing, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, SaveDialogOptions, SaveDialogReturnValue, screen, shell, webContents } from 'electron';
 import { arch, cpus, freemem, loadavg, platform, release, totalmem, type } from 'os';
 import { promisify } from 'util';
@@ -1173,6 +1173,55 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 
 	async createZipFile(windowId: number | undefined, zipPath: URI, files: { path: string; contents: string }[]): Promise<void> {
 		await zip(zipPath.fsPath, files);
+	}
+
+	//#endregion
+
+	//#region AI Core — Agent run_command (PR-2 / HGT-003)
+
+	async runAgentToolShellCommand(_windowId: number | undefined, options: { cwd: string; command: string }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+		const { cwd, command } = options;
+		if (!command || command.length > 100_000) {
+			throw new Error('runAgentToolShellCommand: invalid command');
+		}
+		const maxBytes = 512 * 1024;
+		const timeoutMs = 120_000;
+		const trim = (s: string) => (s.length > maxBytes ? s.slice(0, maxBytes) + '\n...[truncated]' : s);
+
+		return new Promise((resolve, reject) => {
+			let killedByTimeout = false;
+			const child = isWindows
+				? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], { cwd, windowsHide: true, env: { ...process.env } })
+				: spawn('/bin/sh', ['-c', command], { cwd, env: { ...process.env } });
+
+			let stdout = '';
+			let stderr = '';
+			const timer = setTimeout(() => {
+				killedByTimeout = true;
+				child.kill('SIGTERM');
+				setTimeout(() => child.kill('SIGKILL'), 5000).unref?.();
+			}, timeoutMs);
+
+			child.stdout?.on('data', (d: Buffer) => {
+				stdout = trim(stdout + d.toString());
+			});
+			child.stderr?.on('data', (d: Buffer) => {
+				stderr = trim(stderr + d.toString());
+			});
+			child.on('error', err => {
+				clearTimeout(timer);
+				reject(err);
+			});
+			child.on('close', (code, signal) => {
+				clearTimeout(timer);
+				if (killedByTimeout) {
+					resolve({ exitCode: 124, stdout, stderr: trim(stderr + '\n[agent shell: timeout]') });
+					return;
+				}
+				const exitCode = typeof code === 'number' ? code : (signal ? 1 : 0);
+				resolve({ exitCode, stdout, stderr });
+			});
+		});
 	}
 
 	//#endregion

@@ -18,6 +18,8 @@
         "test-build-scripts": "cd build && npm run test",
         "preinstall": "node build/npm/preinstall.ts",
         "postinstall": "node build/npm/postinstall.ts",
+        "harness-eval": "node scripts/harness-eval/run.mjs",
+        "harness-eval:full": "node scripts/harness-eval/run.mjs --full",
         "compile": "npm run gulp compile",
         "compile-check-ts-native": "tsgo --project ./src/tsconfig.json --noEmit --skipLibCheck",
         "watch": "npm-run-all2 -lp watch-client watch-extensions watch-chat-webview",

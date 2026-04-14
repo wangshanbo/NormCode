@@ -510,10 +510,6 @@ export function registerChatActions() {
 					when: ContextKeyExpr.and(ChatContextKeys.inChatSession, ChatContextKeys.inChatEditor)
 				},
 				menu: [{
-					id: MenuId.ChatTitleBarMenu,
-					group: 'b_new',
-					order: 0
-				}, {
 					id: MenuId.ChatNewMenu,
 					group: '2_new',
 					order: 2
@@ -541,10 +537,6 @@ export function registerChatActions() {
 				category: CHAT_CATEGORY,
 				precondition: ChatContextKeys.enabled,
 				menu: [{
-					id: MenuId.ChatTitleBarMenu,
-					group: 'b_new',
-					order: 1
-				}, {
 					id: MenuId.ChatNewMenu,
 					group: '2_new',
 					order: 3

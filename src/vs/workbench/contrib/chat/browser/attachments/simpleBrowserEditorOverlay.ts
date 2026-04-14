@@ -389,8 +389,9 @@ class SimpleBrowserOverlayController {
 
 			const isSimpleBrowser = editor?.input.editorId === 'mainThreadWebview-simpleBrowser.view';
 			const isLiveServer = editor?.input.editorId === 'mainThreadWebview-browserPreview';
+			const isProjectPreview = editor?.input.editorId === 'aicore.projectPreview';
 
-			if (isSimpleBrowser || isLiveServer) {
+			if (isSimpleBrowser || isLiveServer || isProjectPreview) {
 				const webviewInput = editor.input as WebviewInput;
 				return webviewInput.webview.container.id;
 			}

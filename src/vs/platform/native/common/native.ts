@@ -239,6 +239,12 @@ export interface ICommonNativeHostService {
 	 * @param files An array of file entries to include in the zip, each with a relative path and string contents.
 	 */
 	createZipFile(zipPath: URI, files: { path: string; contents: string }[]): Promise<void>;
+
+	/**
+	 * AI Core `run_command`：在工作目录执行 shell 命令，**捕获 stdout/stderr/exitCode**（仅 Electron 主进程；Web 不可用）。
+	 * 与终端面板注入分离，便于 Harness 将非零退出视为失败。
+	 */
+	runAgentToolShellCommand(options: { cwd: string; command: string }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
 export const INativeHostService = createDecorator<INativeHostService>('nativeHostService');

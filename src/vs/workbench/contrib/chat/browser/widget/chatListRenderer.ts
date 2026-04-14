@@ -80,6 +80,7 @@ import { ChatErrorContentPart } from './chatContentParts/chatErrorContentPart.js
 import { ChatExtensionsContentPart } from './chatContentParts/chatExtensionsContentPart.js';
 import { ChatMarkdownContentPart, codeblockHasClosingBackticks } from './chatContentParts/chatMarkdownContentPart.js';
 import { ChatMcpServersInteractionContentPart } from './chatContentParts/chatMcpServersInteractionContentPart.js';
+import { ChatModeSelectionCardContentPart } from './chatContentParts/chatModeSelectionCardContentPart.js';
 import { ChatMultiDiffContentPart } from './chatContentParts/chatMultiDiffContentPart.js';
 import { ChatProgressContentPart, ChatWorkingProgressContentPart } from './chatContentParts/chatProgressContentPart.js';
 import { ChatPullRequestContentPart } from './chatContentParts/chatPullRequestContentPart.js';
@@ -1471,6 +1472,8 @@ export class ChatListItemRenderer extends Disposable implements ITreeRenderer<Ch
 				return this.instantiationService.createInstance(ChatWorkingProgressContentPart, content, this.chatContentMarkdownRenderer, context);
 			} else if (content.kind === 'progressTask' || content.kind === 'progressTaskSerialized') {
 				return this.renderProgressTask(content, templateData, context);
+			} else if (content.kind === 'modeSelectionCard') {
+				return this.instantiationService.createInstance(ChatModeSelectionCardContentPart, content);
 			} else if (content.kind === 'command') {
 				return this.instantiationService.createInstance(ChatCommandButtonContentPart, content, context);
 			} else if (content.kind === 'textEditGroup') {

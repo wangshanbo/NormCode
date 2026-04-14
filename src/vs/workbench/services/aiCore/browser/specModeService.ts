@@ -349,6 +349,9 @@ export class SpecModeService extends Disposable implements ISpecModeService {
 
 	private _currentSession: SpecSession | undefined;
 	private _specsFolder: URI | undefined;
+	private readonly _runningTaskIds = new Set<string>();
+	private _activeLLMRequestCount = 0;
+	private readonly _pendingLLMRequestQueue: Array<() => void> = [];
 
 	private readonly _onDidUpdateSession = this._register(new Emitter<SpecSession>());
 	readonly onDidUpdateSession = this._onDidUpdateSession.event;
@@ -377,6 +380,39 @@ export class SpecModeService extends Disposable implements ISpecModeService {
 		const configKey = this.configurationService.getValue<string>('aiCore.glmApiKey');
 		const configEndpointKey = this.configurationService.getValue<string>('aiCore.zhipuApiKey');
 		return configKey || configEndpointKey || '20cca2b90c8c4348aaab3d4f6814c33b.Ow4WJfqfc06uB4KI';
+	}
+
+	private getMaxConcurrentLLMRequests(): number {
+		const configured = this.configurationService.getValue<number>('aiCore.maxParallelSubagents') || 3;
+		return Math.max(1, Math.min(3, configured));
+	}
+
+	private async acquireLLMRequestSlot(label: string): Promise<() => void> {
+		const limit = this.getMaxConcurrentLLMRequests();
+		if (this._activeLLMRequestCount < limit) {
+			this._activeLLMRequestCount++;
+			this.logService.trace(`[SpecModeService] Acquired LLM slot for ${label}. active=${this._activeLLMRequestCount}/${limit}`);
+			return () => this.releaseLLMRequestSlot(label);
+		}
+
+		this.logService.trace(`[SpecModeService] Queuing LLM request for ${label}. active=${this._activeLLMRequestCount}/${limit}`);
+		return await new Promise(resolve => {
+			this._pendingLLMRequestQueue.push(() => {
+				this._activeLLMRequestCount++;
+				this.logService.trace(`[SpecModeService] Dequeued LLM request for ${label}. active=${this._activeLLMRequestCount}/${limit}`);
+				resolve(() => this.releaseLLMRequestSlot(label));
+			});
+		});
+	}
+
+	private releaseLLMRequestSlot(label: string): void {
+		this._activeLLMRequestCount = Math.max(0, this._activeLLMRequestCount - 1);
+		const limit = this.getMaxConcurrentLLMRequests();
+		this.logService.trace(`[SpecModeService] Released LLM slot for ${label}. active=${this._activeLLMRequestCount}/${limit}`);
+		const next = this._pendingLLMRequestQueue.shift();
+		if (next) {
+			next();
+		}
 	}
 
 	private initSpecsFolder(): void {
@@ -1373,7 +1409,7 @@ ${componentsSummary}
 	// ========================================================================
 
 	/**
-	 * 调用智谱 AI GLM-4.7 生成内容
+	 * 调用智谱 AI GLM-5.x 生成内容
 	 * 使用流式请求避免超时，但收集完整响应
 	 */
 	private async callLLM(prompt: string): Promise<string> {
@@ -1382,78 +1418,84 @@ ${componentsSummary}
 		this.logService.info(`[SpecModeService] Calling LLM with prompt length: ${prompt.length}`);
 
 		try {
+			const release = await this.acquireLLMRequestSlot('callLLM');
 			const controller = new AbortController();
 			const timeoutId = setTimeout(() => controller.abort(), 120000); // 2分钟超时
 
-			const response = await fetch(this.API_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${apiKey}`
-				},
-				body: JSON.stringify({
-					model: 'glm-4.7',
-					messages: [
-						{
-							role: 'system',
-							content: '你是一个专业的软件架构师和产品经理。请根据用户的需求生成结构化的输出。始终使用 JSON 格式输出，确保 JSON 格式正确可解析。'
-						},
-						{
-							role: 'user',
-							content: prompt
+			try {
+				const response = await fetch(this.API_ENDPOINT, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${apiKey}`
+					},
+					body: JSON.stringify({
+						model: 'glm-5.1',
+						messages: [
+							{
+								role: 'system',
+								content: '你是一个专业的软件架构师和产品经理。请根据用户的需求生成结构化的输出。始终使用 JSON 格式输出，确保 JSON 格式正确可解析。'
+							},
+							{
+								role: 'user',
+								content: prompt
+							}
+						],
+						temperature: 0.3,
+						max_tokens: 16384,
+						stream: true // 使用流式输出
+					}),
+					signal: controller.signal
+				});
+
+				clearTimeout(timeoutId);
+
+				if (!response.ok) {
+					const errorText = await response.text().catch(() => '');
+					throw new Error(`API error: ${response.status} - ${errorText}`);
+				}
+
+				// 读取流式响应
+				const reader = response.body?.getReader();
+				if (!reader) {
+					throw new Error('No response body');
+				}
+
+				const decoder = new TextDecoder();
+				let content = '';
+				let buffer = '';
+
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					const lines = buffer.split('\n');
+					buffer = lines.pop() ?? '';
+
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) continue;
+						const data = line.slice(6).trim();
+						if (data === '[DONE]') continue;
+
+						try {
+							const parsed = JSON.parse(data);
+							const delta = parsed.choices?.[0]?.delta?.content;
+							if (delta) {
+								content += delta;
+							}
+						} catch {
+							// 忽略解析错误
 						}
-					],
-					temperature: 0.3,
-					max_tokens: 16384,
-					stream: true // 使用流式输出
-				}),
-				signal: controller.signal
-			});
-
-			clearTimeout(timeoutId);
-
-			if (!response.ok) {
-				const errorText = await response.text().catch(() => '');
-				throw new Error(`API error: ${response.status} - ${errorText}`);
-			}
-
-			// 读取流式响应
-			const reader = response.body?.getReader();
-			if (!reader) {
-				throw new Error('No response body');
-			}
-
-			const decoder = new TextDecoder();
-			let content = '';
-			let buffer = '';
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() ?? '';
-
-				for (const line of lines) {
-					if (!line.startsWith('data: ')) continue;
-					const data = line.slice(6).trim();
-					if (data === '[DONE]') continue;
-
-					try {
-						const parsed = JSON.parse(data);
-						const delta = parsed.choices?.[0]?.delta?.content;
-						if (delta) {
-							content += delta;
-						}
-					} catch {
-						// 忽略解析错误
 					}
 				}
-			}
 
-			this.logService.info(`[SpecModeService] LLM response length: ${content.length}`);
-			return content;
+				this.logService.info(`[SpecModeService] LLM response length: ${content.length}`);
+				return content;
+			} finally {
+				clearTimeout(timeoutId);
+				release();
+			}
 		} catch (error) {
 			const errorMsg = String(error);
 			this.logService.error(`[SpecModeService] LLM call failed: ${errorMsg}`);
@@ -1478,6 +1520,9 @@ ${componentsSummary}
 		const session = this._currentSession;
 		if (!session) {
 			return { success: false, result: 'No active session' };
+		}
+		if (this._runningTaskIds.has(task.id)) {
+			return { success: false, result: '该任务正在执行中，请勿重复点击' };
 		}
 
 		// 构建任务执行的上下文
@@ -1510,15 +1555,18 @@ ${context}
 
 请开始执行：`;
 
+		this._runningTaskIds.add(task.id);
 		try {
-			const result = await this.callLLM(prompt);
+			const result = await this.callLLMWithRetry(prompt);
 
 			// 标记任务为完成
 			this.completeTask(task.id);
 
 			return { success: true, result };
 		} catch (error) {
-			return { success: false, result: String(error) };
+			return { success: false, result: toFriendlyErrorMessage(error) };
+		} finally {
+			this._runningTaskIds.delete(task.id);
 		}
 	}
 

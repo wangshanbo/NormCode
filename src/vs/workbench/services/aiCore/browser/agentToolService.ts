@@ -12,6 +12,10 @@ import { ISearchService, QueryType, ITextQuery } from '../../../services/search/
 import { ITerminalService } from '../../../contrib/terminal/browser/terminal.js';
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
+import { IMcpService, McpToolVisibility } from '../../../contrib/mcp/common/mcpTypes.js';
+import { findMcpServer, startServerAndWaitForLiveTools } from '../../../contrib/mcp/common/mcpTypesUtils.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -23,6 +27,10 @@ import {
 	AGENT_TOOL_NAMES,
 	toGLMToolsFormat
 } from '../common/agentTools.js';
+import { applyHarnessToolValidation } from '../common/agentToolHarnessValidation.js';
+import { IHarnessTraceService } from './harnessTraceService.js';
+import { IHarnessAuditLogService } from './harnessAuditLogService.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
 
 export type ExecutionMode = 'autopilot' | 'supervised';
 
@@ -73,6 +81,9 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 		@ITerminalService private readonly terminalService: ITerminalService,
 		@IMarkerService private readonly markerService: IMarkerService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IHarnessTraceService private readonly harnessTraceService: IHarnessTraceService,
+		@IHarnessAuditLogService private readonly harnessAuditLogService: IHarnessAuditLogService,
 	) {
 		super();
 		this.registerDefaultTools();
@@ -196,6 +207,17 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 			execute: async (args) => this.webSearchDeep(args)
 		});
 
+		this._tools.set(AGENT_TOOL_NAMES.MCP_CALL, {
+			name: AGENT_TOOL_NAMES.MCP_CALL,
+			description: '调用已配置的 MCP 工具。server_id 须与 VS Code MCP 定义 id 一致且在 .sentinel/mcp_allowlist.json 白名单内（如 cursor-ide-browser）。tool_name 为 MCP 工具名；arguments_json 为参数的 JSON 字符串。',
+			parameters: [
+				{ name: 'server_id', type: 'string', description: 'MCP server definition id', required: true },
+				{ name: 'tool_name', type: 'string', description: '工具名称（与 MCP 定义一致）', required: true },
+				{ name: 'arguments_json', type: 'string', description: '传给 MCP 工具的 JSON 字符串，缺省为 {}', required: false },
+			],
+			execute: async (args) => this.mcpCall(args)
+		});
+
 		this.logService.info(`[AgentToolService]: Registered ${this._tools.size} tools`);
 	}
 
@@ -213,14 +235,29 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 			return { success: false, error: `Unknown tool: ${toolName}` };
 		}
 
-		this.logService.info(`[AgentToolService]: Executing tool ${toolName} with args: ${JSON.stringify(args)}`);
+		const tid = this.harnessTraceService.getTraceId();
+		const tprefix = tid ? `[trace=${tid}] ` : '';
+		this.logService.info(`${tprefix}[AgentToolService]: Executing tool ${toolName} with args: ${JSON.stringify(args)}`);
 
 		try {
-			const result = await tool.execute(args);
-			this.logService.info(`[AgentToolService]: Tool ${toolName} completed: ${result.success}`);
+			const raw = await tool.execute(args);
+			const result = applyHarnessToolValidation(toolName, raw);
+			this.logService.info(`${tprefix}[AgentToolService]: Tool ${toolName} completed: ${result.success}`);
+			if (
+				result.success &&
+				(toolName === AGENT_TOOL_NAMES.RUN_COMMAND ||
+					toolName === AGENT_TOOL_NAMES.WRITE_FILE ||
+					toolName === AGENT_TOOL_NAMES.MCP_CALL)
+			) {
+				void this.harnessAuditLogService.append('agent_tool', {
+					tool: toolName,
+					ok: true,
+					argsPreview: JSON.stringify(args).slice(0, 2000),
+				});
+			}
 			return result;
 		} catch (error) {
-			this.logService.error(`[AgentToolService]: Tool ${toolName} failed: ${String(error)}`);
+			this.logService.error(`${tprefix}[AgentToolService]: Tool ${toolName} failed: ${String(error)}`);
 			return { success: false, error: String(error) };
 		}
 	}
@@ -397,25 +434,64 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 
 	private async runCommand(args: Record<string, unknown>): Promise<AgentToolResult> {
 		const command = args.command as string;
-		const cwd = args.cwd as string | undefined;
+		const cwdArg = args.cwd as string | undefined;
+		if (!command?.trim()) {
+			return { success: false, error: 'command is required' };
+		}
+
+		const folders = this.workspaceService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return { success: false, error: 'No workspace folder' };
+		}
+		const cwdUri = cwdArg ? this.resolveUri(cwdArg) : folders[0].uri;
+		if (!cwdUri) {
+			return { success: false, error: 'Invalid cwd' };
+		}
+		const cwdFs = cwdUri.fsPath;
+
+		/** Electron：主进程子进程执行，可验 exitCode（PR-2 / HGT-003） */
+		let native: INativeHostService | undefined;
+		try {
+			native = this.instantiationService.invokeFunction(accessor => accessor.get(INativeHostService));
+		} catch {
+			native = undefined;
+		}
+
+		if (native) {
+			try {
+				const r = await native.runAgentToolShellCommand({ cwd: cwdFs, command });
+				const ok = r.exitCode === 0;
+				const parts = [
+					ok ? '命令已执行（子进程，exitCode=0）' : `命令结束 exitCode=${r.exitCode}`,
+					`cwd: ${cwdFs}`,
+					r.stdout ? `--- stdout ---\n${r.stdout}` : '',
+					r.stderr ? `--- stderr ---\n${r.stderr}` : '',
+				].filter(Boolean);
+				return {
+					success: ok,
+					output: parts.join('\n\n'),
+					error: ok ? undefined : `进程退出码 ${r.exitCode}`,
+					data: { exitCode: r.exitCode, cwd: cwdFs, command },
+				};
+			} catch (e) {
+				return { success: false, error: String(e) };
+			}
+		}
 
 		try {
-			// 创建或使用现有终端
 			const terminal = this.terminalService.activeInstance ||
-				await this.terminalService.createTerminal({ cwd });
+				await this.terminalService.createTerminal({ cwd: cwdUri });
 
 			if (!terminal) {
 				return { success: false, error: 'Failed to create terminal' };
 			}
 
-			// 发送命令
 			terminal.sendText(command, true);
 
-			// 注意：实际输出需要异步收集，这里简化处理
 			return {
 				success: true,
-				output: `命令已在终端执行: ${command}\n工作目录: ${cwd || '项目根目录'}\n\n请查看终端输出了解执行结果。`,
-				data: { command, cwd }
+				output: `命令已发送到终端（无 exitCode；桌面 Electron 下将使用子进程执行）。\n命令: ${command}\n工作目录: ${cwdFs}\n\n请查看终端输出了解执行结果。`,
+				data: { command, cwd: cwdFs, legacyTerminal: true },
 			};
 		} catch (error) {
 			return { success: false, error: String(error) };
@@ -617,6 +693,116 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 	}
 
 	// ========================================================================
+	// MCP（经工作区 allowlist）
+	// ========================================================================
+
+	private async readMcpAllowlistServerIds(): Promise<string[]> {
+		const folders = this.workspaceService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return [];
+		}
+		const root = folders[0].uri;
+		let rel = '.sentinel/mcp_allowlist.json';
+		try {
+			const harness = await this.fileService.readFile(URI.joinPath(root, '.sentinel', 'harness.json'));
+			const h = JSON.parse(harness.value.toString()) as { mcpAllowlistFile?: string };
+			if (typeof h.mcpAllowlistFile === 'string' && h.mcpAllowlistFile.length > 0) {
+				rel = h.mcpAllowlistFile.replace(/\\/g, '/');
+			}
+		} catch {
+			// use default rel
+		}
+		let uri = root;
+		for (const seg of rel.split('/').filter(s => s.length > 0)) {
+			uri = URI.joinPath(uri, seg);
+		}
+		try {
+			const file = await this.fileService.readFile(uri);
+			const data = JSON.parse(file.value.toString()) as { servers?: string[] | Record<string, unknown>; definitions?: Record<string, unknown> };
+			if (Array.isArray(data.servers)) {
+				return data.servers.map(String);
+			}
+			if (data.servers && typeof data.servers === 'object') {
+				return Object.keys(data.servers);
+			}
+			if (data.definitions && typeof data.definitions === 'object') {
+				return Object.keys(data.definitions);
+			}
+			return [];
+		} catch {
+			return [];
+		}
+	}
+
+	private async mcpCall(args: Record<string, unknown>): Promise<AgentToolResult> {
+		const serverId = String(args.server_id ?? '').trim();
+		const toolName = String(args.tool_name ?? '').trim();
+		let toolArgs: Record<string, unknown> = {};
+		const rawJson = args.arguments_json;
+		if (typeof rawJson === 'string' && rawJson.trim()) {
+			try {
+				toolArgs = JSON.parse(rawJson) as Record<string, unknown>;
+			} catch {
+				return { success: false, error: 'arguments_json 不是合法 JSON' };
+			}
+		} else if (args.arguments && typeof args.arguments === 'object' && args.arguments !== null) {
+			toolArgs = args.arguments as Record<string, unknown>;
+		}
+		if (!serverId || !toolName) {
+			return { success: false, error: '需要 server_id 与 tool_name' };
+		}
+		const allowed = await this.readMcpAllowlistServerIds();
+		if (allowed.length === 0) {
+			return { success: false, error: 'MCP 白名单为空或缺失；请配置 .sentinel/mcp_allowlist.json' };
+		}
+		if (!allowed.includes(serverId)) {
+			return { success: false, error: `server_id「${serverId}」不在白名单内` };
+		}
+		let mcp: IMcpService;
+		try {
+			mcp = this.instantiationService.invokeFunction(accessor => accessor.get(IMcpService));
+		} catch (e) {
+			return { success: false, error: `无法获取 MCP 服务：${String(e)}` };
+		}
+		await mcp.activateCollections();
+		const cts = new CancellationTokenSource();
+		try {
+			const server = await findMcpServer(mcp, s => s.definition.id === serverId, cts.token);
+			if (!server) {
+				return { success: false, error: `未找到 MCP server「${serverId}」；请确认已安装并在 MCP 面板中可见` };
+			}
+			const started = await startServerAndWaitForLiveTools(server, { promptType: 'never' }, cts.token);
+			if (!started) {
+				return { success: false, error: `无法启动 MCP server「${serverId}」或工具列表未就绪（可在 MCP 输出面板查看）` };
+			}
+			const tools = server.tools.get();
+			const tool = tools.find(t => t.definition.name === toolName || t.referenceName === toolName);
+			if (!tool) {
+				const names = tools.map(t => t.definition.name).join(', ');
+				return { success: false, error: `工具「${toolName}」不存在。可用：${names || '（无）'}` };
+			}
+			const vis = tool.visibility;
+			if (vis !== undefined && (vis & (McpToolVisibility.Model | McpToolVisibility.App)) === 0) {
+				return { success: false, error: '该工具不可被调用（visibility）' };
+			}
+			const result = await tool.call(toolArgs, undefined, cts.token);
+			const text = (result.content || [])
+				.map(c => ('text' in c && typeof (c as { text?: string }).text === 'string' ? (c as { text: string }).text : JSON.stringify(c)))
+				.join('\n');
+			const out = text.slice(0, 100000);
+			if (result.isError) {
+				return { success: false, output: out, error: out || 'MCP 工具返回 isError' };
+			}
+			return { success: true, output: out || '(empty)', data: { server_id: serverId, tool_name: toolName } };
+		} catch (e) {
+			this.logService.error(`[AgentToolService]: mcp_call failed: ${String(e)}`);
+			return { success: false, error: String(e) };
+		} finally {
+			cts.dispose();
+		}
+	}
+
+	// ========================================================================
 	// Web Browsing Tools - 深度网页访问
 	// ========================================================================
 
@@ -645,7 +831,7 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 					'Authorization': `Bearer ${apiKey}`
 				},
 				body: JSON.stringify({
-					model: 'glm-4.7',
+					model: 'glm-5.1',
 					messages: [
 						{
 							role: 'system',
@@ -716,7 +902,7 @@ export class AgentToolService extends Disposable implements IAgentToolService {
 					'Authorization': `Bearer ${apiKey}`
 				},
 				body: JSON.stringify({
-					model: 'glm-4.7',
+					model: 'glm-5.1',
 					messages: [
 						{
 							role: 'system',

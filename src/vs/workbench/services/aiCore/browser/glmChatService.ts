@@ -14,6 +14,7 @@ import { InstantiationType, registerSingleton } from '../../../../platform/insta
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { IHarnessTraceService } from './harnessTraceService.js';
 import { URI } from '../../../../base/common/uri.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 
@@ -26,6 +27,32 @@ export interface GLMMessage {
 	content?: string;
 	tool_calls?: GLMToolCall[];
 	tool_call_id?: string;
+}
+
+/** HGT-012：保留最近若干条 tool 消息全文，更早的替换为占位，降低陈旧工具结果体积 */
+function compactStaleToolMessagesForHgt012(messages: GLMMessage[], keepLast: number): GLMMessage[] {
+	if (keepLast <= 0) {
+		return messages;
+	}
+	const toolIndices: number[] = [];
+	for (let i = 0; i < messages.length; i++) {
+		if (messages[i].role === 'tool') {
+			toolIndices.push(i);
+		}
+	}
+	if (toolIndices.length <= keepLast) {
+		return messages;
+	}
+	const drop = new Set(toolIndices.slice(0, toolIndices.length - keepLast));
+	const placeholder = '[HGT-012：较早的 tool 输出已省略；如需请 read_file 或重新调用工具]';
+	return messages.map((m, i) => (drop.has(i) ? { ...m, content: placeholder } : m));
+}
+
+/** 非流式 API 返回的 assistant / tool 消息形状 */
+export interface GLMCompletionMessage {
+	role: string;
+	content?: string | null;
+	tool_calls?: GLMToolCall[];
 }
 
 export interface GLMToolCall {
@@ -160,6 +187,16 @@ export interface IGLMChatService {
 	): AsyncGenerator<GLMStreamEvent>;
 
 	/**
+	 * 单次非流式补全（用于 Sentinel / Agent 工具循环，需完整解析 tool_calls）
+	 */
+	completeChatTurn(
+		messages: GLMMessage[],
+		context: GLMChatContext,
+		options?: GLMChatOptions,
+		token?: CancellationToken,
+	): Promise<GLMCompletionMessage>;
+
+	/**
 	 * 构建系统提示词
 	 */
 	buildSystemPrompt(context: GLMChatContext, mode: 'chat' | 'agent', chatMode?: 'vibe' | 'spec'): string;
@@ -237,7 +274,7 @@ export interface IGLMChatService {
 	getCacheStats(sessionId?: string): { totalTokens: number; cachedTokens: number; savings: string };
 
 	/**
-	 * 使用 GLM-5 做前置任务分析，返回自动路由计划
+	 * 使用 GLM-5.1 做前置任务分析，返回自动路由计划
 	 */
 	analyzeTaskAndRoute(userMessage: string, context: GLMChatContext, chatMode: 'vibe' | 'spec', isAgentMode: boolean, forceRouter?: boolean): Promise<GLMTaskRoutingPlan>;
 }
@@ -251,14 +288,18 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 
 	private readonly API_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 	private readonly DEFAULT_API_KEY = '20cca2b90c8c4348aaab3d4f6814c33b.Ow4WJfqfc06uB4KI';
-	private readonly DEFAULT_MODEL = 'glm-4.7';
-	private readonly ROUTER_MODEL = 'glm-5';
+	private readonly DEFAULT_MODEL = 'glm-5.1';
+	private readonly ROUTER_MODEL = 'glm-5.1';
+	/** 应用仅支持 glm-5 / glm-5.1，其余配置值会回落并打日志 */
+	private readonly ALLOWED_GLM_MODEL_IDS = new Set<string>(['glm-5', 'glm-5.1']);
 
 	// ========================================================================
 	// 会话管理 - 支持上下文缓存
 	// ========================================================================
 	private readonly _sessions: Map<string, ChatSession> = new Map();
 	private _currentSessionId: string | undefined;
+	private _activeRequestCount = 0;
+	private readonly _pendingRequestQueue: Array<() => void> = [];
 
 	/** 最大历史消息数量（避免超出 token 限制） */
 	private readonly MAX_HISTORY_MESSAGES = 50;
@@ -269,8 +310,42 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 	constructor(
 		@ILogService private readonly logService: ILogService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IHarnessTraceService private readonly harnessTraceService: IHarnessTraceService,
 	) {
 		super();
+	}
+
+	private getMaxConcurrentRequests(): number {
+		const configured = this.configurationService.getValue<number>('aiCore.maxParallelSubagents') || 3;
+		return Math.max(1, Math.min(3, configured));
+	}
+
+	private async acquireRequestSlot(label: string): Promise<() => void> {
+		const limit = this.getMaxConcurrentRequests();
+		if (this._activeRequestCount < limit) {
+			this._activeRequestCount++;
+			this.logService.trace(`[GLMChatService] Acquired request slot for ${label}. active=${this._activeRequestCount}/${limit}`);
+			return () => this.releaseRequestSlot(label);
+		}
+
+		this.logService.trace(`[GLMChatService] Queuing request for ${label}. active=${this._activeRequestCount}/${limit}`);
+		return await new Promise(resolve => {
+			this._pendingRequestQueue.push(() => {
+				this._activeRequestCount++;
+				this.logService.trace(`[GLMChatService] Dequeued request for ${label}. active=${this._activeRequestCount}/${limit}`);
+				resolve(() => this.releaseRequestSlot(label));
+			});
+		});
+	}
+
+	private releaseRequestSlot(label: string): void {
+		this._activeRequestCount = Math.max(0, this._activeRequestCount - 1);
+		const limit = this.getMaxConcurrentRequests();
+		this.logService.trace(`[GLMChatService] Released request slot for ${label}. active=${this._activeRequestCount}/${limit}`);
+		const next = this._pendingRequestQueue.shift();
+		if (next) {
+			next();
+		}
 	}
 
 	// ========================================================================
@@ -500,8 +575,19 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		return this.configurationService.getValue<string>('aiCore.glmApiKey') || this.DEFAULT_API_KEY;
 	}
 
+	private normalizeGlmModelId(raw: string | undefined, fallback: string): string {
+		const m = (raw ?? '').trim();
+		if (this.ALLOWED_GLM_MODEL_IDS.has(m)) {
+			return m;
+		}
+		if (m) {
+			this.logService.warn(`[GLMChatService] Unsupported or deprecated model "${m}" — only glm-5 and glm-5.1 are allowed. Using ${fallback}.`);
+		}
+		return fallback;
+	}
+
 	private getModel(): string {
-		return this.configurationService.getValue<string>('aiCore.glmModel') || this.DEFAULT_MODEL;
+		return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.glmModel'), this.DEFAULT_MODEL);
 	}
 
 	private isAutoRoutingEnabled(): boolean {
@@ -513,23 +599,26 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 	}
 
 	private getModelByComplexity(complexity: 'simple' | 'medium' | 'hard'): string {
+		const fallback = 'glm-5.1';
 		if (complexity === 'simple') {
-			return this.configurationService.getValue<string>('aiCore.routingModelSimple') || 'glm-4.7-flash';
+			return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingModelSimple'), 'glm-5');
 		}
 		if (complexity === 'medium') {
-			return this.configurationService.getValue<string>('aiCore.routingModelMedium') || 'glm-4.7';
+			return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingModelMedium'), fallback);
 		}
-		return this.configurationService.getValue<string>('aiCore.routingModelHard') || 'glm-5';
+		return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingModelHard'), fallback);
 	}
 
 	private getVisionModelByComplexity(complexity: 'simple' | 'medium' | 'hard'): string {
+		const defSimple = 'glm-5';
+		const defHard = 'glm-5.1';
 		if (complexity === 'simple') {
-			return this.configurationService.getValue<string>('aiCore.routingVisionModelSimple') || 'glm-4.6v-flash';
+			return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingVisionModelSimple'), defSimple);
 		}
 		if (complexity === 'medium') {
-			return this.configurationService.getValue<string>('aiCore.routingVisionModelMedium') || 'glm-4.6v-flashx';
+			return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingVisionModelMedium'), defHard);
 		}
-		return this.configurationService.getValue<string>('aiCore.routingVisionModelHard') || 'glm-4.6v';
+		return this.normalizeGlmModelId(this.configurationService.getValue<string>('aiCore.routingVisionModelHard'), defHard);
 	}
 
 	private hasVisualInputs(userMessage: string, context: GLMChatContext): boolean {
@@ -617,65 +706,70 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		].join('\n');
 
 		try {
-			const response = await fetch(this.API_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${this.getApiKey()}`
-				},
-				body: JSON.stringify({
-					model: this.ROUTER_MODEL,
-					messages: [
-						{ role: 'system', content: '你是严谨的任务难度评估器。输出必须是合法 JSON。' },
-						{ role: 'user', content: prompt }
-					],
-					temperature: 0.1,
-					max_tokens: 300,
-					stream: false
-				})
-			});
+			const release = await this.acquireRequestSlot('analyzeTaskAndRoute');
+			try {
+				const response = await fetch(this.API_ENDPOINT, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${this.getApiKey()}`
+					},
+					body: JSON.stringify({
+						model: this.ROUTER_MODEL,
+						messages: [
+							{ role: 'system', content: '你是严谨的任务难度评估器。输出必须是合法 JSON。' },
+							{ role: 'user', content: prompt }
+						],
+						temperature: 0.1,
+						max_tokens: 300,
+						stream: false
+					})
+				});
 
-			if (!response.ok) {
-				this.logService.warn(`[GLMChatService] Router model failed: ${response.status}, fallback to heuristic`);
-				return this.getFallbackRoutingPlan(userMessage);
+				if (!response.ok) {
+					this.logService.warn(`[GLMChatService] Router model failed: ${response.status}, fallback to heuristic`);
+					return this.getFallbackRoutingPlan(userMessage);
+				}
+
+				const data = await response.json();
+				const content = data?.choices?.[0]?.message?.content || '';
+				const match = content.match(/\{[\s\S]*\}/);
+				if (!match) {
+					this.logService.warn('[GLMChatService] Router JSON not found, fallback to heuristic');
+					return this.getFallbackRoutingPlan(userMessage);
+				}
+
+				const parsed = JSON.parse(match[0]) as {
+					complexity?: 'simple' | 'medium' | 'hard';
+					subAgent?: 'quick_responder' | 'implementation_agent' | 'planning_agent';
+					requiresVision?: boolean;
+					reason?: string;
+					confidence?: number;
+				};
+
+				const complexity = parsed.complexity ?? 'medium';
+				const subAgent = parsed.subAgent ?? (complexity === 'hard' ? 'planning_agent' : complexity === 'simple' ? 'quick_responder' : 'implementation_agent');
+				const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.7;
+				const requiresVision = Boolean(parsed.requiresVision) || hasVisionInputs;
+				const routedModel = requiresVision ? this.getVisionModelByComplexity(complexity) : this.getModelByComplexity(complexity);
+
+				const plan: GLMTaskRoutingPlan = {
+					complexity,
+					subAgent,
+					model: routedModel,
+					requiresVision,
+					enableThinking: complexity !== 'simple',
+					enableWebSearch: complexity !== 'simple',
+					maxTokens: complexity === 'hard' ? 32768 : complexity === 'medium' ? 16384 : 8192,
+					reason: parsed.reason || 'GLM-5.1 路由评估',
+					confidence
+				};
+
+				this.logService.info(`[GLMChatService] Routing plan: complexity=${plan.complexity}, subAgent=${plan.subAgent}, vision=${plan.requiresVision}, model=${plan.model}, confidence=${plan.confidence}`);
+				return plan;
+			} finally {
+				release();
 			}
-
-			const data = await response.json();
-			const content = data?.choices?.[0]?.message?.content || '';
-			const match = content.match(/\{[\s\S]*\}/);
-			if (!match) {
-				this.logService.warn('[GLMChatService] Router JSON not found, fallback to heuristic');
-				return this.getFallbackRoutingPlan(userMessage);
-			}
-
-			const parsed = JSON.parse(match[0]) as {
-				complexity?: 'simple' | 'medium' | 'hard';
-				subAgent?: 'quick_responder' | 'implementation_agent' | 'planning_agent';
-				requiresVision?: boolean;
-				reason?: string;
-				confidence?: number;
-			};
-
-			const complexity = parsed.complexity ?? 'medium';
-			const subAgent = parsed.subAgent ?? (complexity === 'hard' ? 'planning_agent' : complexity === 'simple' ? 'quick_responder' : 'implementation_agent');
-			const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.7;
-			const requiresVision = Boolean(parsed.requiresVision) || hasVisionInputs;
-			const routedModel = requiresVision ? this.getVisionModelByComplexity(complexity) : this.getModelByComplexity(complexity);
-
-			const plan: GLMTaskRoutingPlan = {
-				complexity,
-				subAgent,
-				model: routedModel,
-				requiresVision,
-				enableThinking: complexity !== 'simple',
-				enableWebSearch: complexity !== 'simple',
-				maxTokens: complexity === 'hard' ? 32768 : complexity === 'medium' ? 16384 : 8192,
-				reason: parsed.reason || 'GLM-5 路由评估',
-				confidence
-			};
-
-			this.logService.info(`[GLMChatService] Routing plan: complexity=${plan.complexity}, subAgent=${plan.subAgent}, vision=${plan.requiresVision}, model=${plan.model}, confidence=${plan.confidence}`);
-			return plan;
 		} catch (error) {
 			this.logService.warn(`[GLMChatService] Router error, fallback to heuristic: ${String(error)}`);
 			return this.getFallbackRoutingPlan(userMessage);
@@ -706,28 +800,128 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 
 	async testConnection(): Promise<boolean> {
 		try {
-			const response = await fetch(this.API_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${this.getApiKey()}`
-				},
-				body: JSON.stringify({
-					model: this.getModel(),
-					messages: [{ role: 'user', content: 'Hello' }],
-					max_tokens: 10,
-					stream: false
-				})
-			});
+			const release = await this.acquireRequestSlot('testConnection');
+			try {
+				const response = await fetch(this.API_ENDPOINT, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${this.getApiKey()}`
+					},
+					body: JSON.stringify({
+						model: this.getModel(),
+						messages: [{ role: 'user', content: 'Hello' }],
+						max_tokens: 10,
+						stream: false
+					})
+				});
 
-			if (response.ok) {
-				this.logService.info('[GLMChatService] Connection test successful');
-				return true;
+				if (response.ok) {
+					this.logService.info('[GLMChatService] Connection test successful');
+					return true;
+				}
+				return false;
+			} finally {
+				release();
 			}
-			return false;
 		} catch (error) {
 			this.logService.error(`[GLMChatService] Connection test failed: ${String(error)}`);
 			return false;
+		}
+	}
+
+	/**
+	 * 单次 Chat API 联网搜索（内部；HGT-022 由 {@link webSearch} 决定是否重试）
+	 */
+	private async webSearchSingleAttempt(query: string): Promise<WebSearchResult[]> {
+		const apiKey = this.getApiKey();
+		const searchEngine = this.getSearchEngine();
+
+		try {
+			const release = await this.acquireRequestSlot('webSearch');
+			try {
+				const response = await fetch(this.API_ENDPOINT, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${apiKey}`
+					},
+					body: JSON.stringify({
+						model: this.DEFAULT_MODEL,
+						messages: [{ role: 'user', content: query }],
+						tools: [{
+							type: 'web_search',
+							web_search: {
+								enable: true,
+								search_engine: searchEngine,
+								search_result: true
+							}
+						}],
+						stream: false
+					})
+				});
+
+				if (!response.ok) {
+					const errData = await response.json().catch(() => ({}));
+					this.logService.error(`[GLMChatService] Web search failed: ${response.status} - ${JSON.stringify(errData)}`);
+					return [];
+				}
+
+				const data = await response.json();
+				this.logService.trace(`[GLMChatService] Web search response: ${JSON.stringify(data).slice(0, 500)}`);
+
+				const results: WebSearchResult[] = [];
+
+				if (data.choices?.[0]?.message?.tool_calls) {
+					for (const toolCall of data.choices[0].message.tool_calls) {
+						if (toolCall.type === 'web_browser' && toolCall.web_browser?.outputs) {
+							for (const output of toolCall.web_browser.outputs) {
+								results.push({
+									title: output.title || '',
+									link: output.link || '',
+									content: output.content || '',
+									media: output.media,
+									icon: output.icon
+								});
+							}
+						}
+						if (toolCall.type === 'web_search' && toolCall.web_search) {
+							const ws = toolCall.web_search;
+							if (ws.search_result) {
+								for (const result of ws.search_result) {
+									results.push({
+										title: result.title || '',
+										link: result.link || result.url || '',
+										content: result.content || result.snippet || '',
+										media: result.media,
+										icon: result.icon
+									});
+								}
+							}
+						}
+					}
+				}
+
+				if (data.web_search && Array.isArray(data.web_search)) {
+					for (const item of data.web_search) {
+						results.push({
+							title: item.title || '',
+							link: item.link || item.url || '',
+							content: item.content || item.snippet || '',
+							media: item.media,
+							icon: item.icon
+						});
+					}
+				}
+
+				this.logService.info(`[GLMChatService] Web search returned ${results.length} results`);
+				return results;
+			} finally {
+				release();
+			}
+		} catch (error) {
+			this.logService.error(`[GLMChatService] Web search error: ${String(error)}`);
+			return [];
 		}
 	}
 
@@ -737,97 +931,19 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 	 * 使用智谱 AI 的 Chat API + web_search 工具
 	 */
 	async webSearch(query: string): Promise<WebSearchResult[]> {
-		const apiKey = this.getApiKey();
 		const searchEngine = this.getSearchEngine();
-
 		this.logService.info(`[GLMChatService] Web search: "${query}" using ${searchEngine}`);
 
-		try {
-			// 使用 Chat API 并启用 web_search 工具
-			const response = await fetch(this.API_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${apiKey}`
-				},
-				body: JSON.stringify({
-					model: this.DEFAULT_MODEL,
-					messages: [{ role: 'user', content: query }],
-					tools: [{
-						type: 'web_search',
-						web_search: {
-							enable: true,
-							search_engine: searchEngine,
-							search_result: true
-						}
-					}],
-					stream: false
-				})
-			});
-
-			if (!response.ok) {
-				const errData = await response.json().catch(() => ({}));
-				this.logService.error(`[GLMChatService] Web search failed: ${response.status} - ${JSON.stringify(errData)}`);
-				return [];
-			}
-
-			const data = await response.json();
-			this.logService.trace(`[GLMChatService] Web search response: ${JSON.stringify(data).slice(0, 500)}`);
-
-			// 解析搜索结果 - 检查 web_search 返回格式
-			const results: WebSearchResult[] = [];
-
-			// 方式1: 从 tool_calls 中提取
-			if (data.choices?.[0]?.message?.tool_calls) {
-				for (const toolCall of data.choices[0].message.tool_calls) {
-					if (toolCall.type === 'web_browser' && toolCall.web_browser?.outputs) {
-						for (const output of toolCall.web_browser.outputs) {
-							results.push({
-								title: output.title || '',
-								link: output.link || '',
-								content: output.content || '',
-								media: output.media,
-								icon: output.icon
-							});
-						}
-					}
-					// 方式2: web_search 类型
-					if (toolCall.type === 'web_search' && toolCall.web_search) {
-						const ws = toolCall.web_search;
-						if (ws.search_result) {
-							for (const result of ws.search_result) {
-								results.push({
-									title: result.title || '',
-									link: result.link || result.url || '',
-									content: result.content || result.snippet || '',
-									media: result.media,
-									icon: result.icon
-								});
-							}
-						}
-					}
-				}
-			}
-
-			// 方式3: 从 web_search 字段提取（某些 API 版本）
-			if (data.web_search && Array.isArray(data.web_search)) {
-				for (const item of data.web_search) {
-					results.push({
-						title: item.title || '',
-						link: item.link || item.url || '',
-						content: item.content || item.snippet || '',
-						media: item.media,
-						icon: item.icon
-					});
-				}
-			}
-
-			this.logService.info(`[GLMChatService] Web search returned ${results.length} results`);
-			return results;
-		} catch (error) {
-			this.logService.error(`[GLMChatService] Web search error: ${String(error)}`);
-			return [];
+		let results = await this.webSearchSingleAttempt(query);
+		if (results.length === 0) {
+			this.logService.warn('[GLMChatService] HGT-022: 首次联网 0 条，500ms 后重试一次');
+			await new Promise<void>(resolve => setTimeout(resolve, 500));
+			results = await this.webSearchSingleAttempt(query);
 		}
+		if (results.length === 0) {
+			this.logService.warn('[GLMChatService] HGT-022: 联网搜索返回 0 条（请检查密钥/网络或改用 browse_url）');
+		}
+		return results;
 	}
 
 	buildSystemPrompt(context: GLMChatContext, mode: 'chat' | 'agent', chatMode?: 'vibe' | 'spec'): string {
@@ -910,27 +1026,150 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 			}
 		}
 
-		// 添加联网搜索结果
 		if (context.webSearchResults && context.webSearchResults.length > 0) {
-			prompt += '## 联网搜索结果\n\n';
-			prompt += '**重要提示**：以下是已经为你检索到的互联网资料，你不需要再访问这些链接。请直接根据这些已提供的信息来回答用户问题，并在回答中引用相关来源。\n\n';
-
-			for (const result of context.webSearchResults) {
-				prompt += `### 📄 ${result.title}\n`;
-				prompt += `- 链接: ${result.link}\n`;
-				if (result.media) {
-					prompt += `- 来源: ${result.media}\n`;
-				}
-				if (result.content) {
-					prompt += `- 摘要: ${result.content}\n`;
-				}
-				prompt += '\n';
-			}
-
-			prompt += '请基于以上搜索结果，结合你的知识，为用户提供完整的答案。不要说"无法访问链接"或"我无法打开网页"等，因为内容已经提供给你了。\n\n';
+			prompt += this.formatWebSearchAppendix(context.webSearchResults);
 		}
 
 		return prompt;
+	}
+
+	/**
+	 * 联网摘要块（追加到已有 system 提示末尾，禁止覆盖 Sentinel Worker 等专用 system）。
+	 */
+	private formatWebSearchAppendix(results: WebSearchResult[]): string {
+		let block = '## 联网搜索结果\n\n';
+		block += '**重要提示**：以下是已经为你检索到的互联网资料，你不需要再访问这些链接。请直接根据这些已提供的信息来回答，并可引用来源。\n\n';
+
+		for (const result of results) {
+			block += `### 📄 ${result.title}\n`;
+			block += `- 链接: ${result.link}\n`;
+			if (result.media) {
+				block += `- 来源: ${result.media}\n`;
+			}
+			if (result.content) {
+				block += `- 摘要: ${result.content}\n`;
+			}
+			block += '\n';
+		}
+
+		block += '请基于以上搜索结果，结合你的知识，完成当前角色任务。不要说"无法访问链接"等，因为内容已经提供给你了。\n\n';
+		return block;
+	}
+
+	async completeChatTurn(
+		messages: GLMMessage[],
+		context: GLMChatContext,
+		options?: GLMChatOptions,
+		token?: CancellationToken,
+	): Promise<GLMCompletionMessage> {
+		const traceId = this.harnessTraceService.beginTrace(`glm:completeChatTurn:${options?.sessionId ?? 'na'}`);
+		try {
+		const apiKey = this.getApiKey();
+		const model = options?.model || this.getModel();
+		const messagesCopy = messages.map(m => ({ ...m }));
+		const enableThinking = options?.enableThinking ?? this.isThinkingEnabled();
+		const enableWebSearch = options?.enableWebSearch ?? this.isWebSearchEnabled();
+
+		this.logService.info(`[trace=${traceId}] [GLMChatService] completeChatTurn: thinking=${enableThinking}, webSearch=${enableWebSearch}`);
+
+		const ctxWarnCt = this.configurationService.getValue<number>('aiCore.contextEstimatedCharsWarn') ?? 0;
+		const keepToolRounds = this.configurationService.getValue<number>('aiCore.contextKeepStaleToolRounds') ?? 0;
+		if (ctxWarnCt > 0) {
+			let estCt = JSON.stringify(messagesCopy).length;
+			if (keepToolRounds > 0 && estCt > ctxWarnCt) {
+				const next = compactStaleToolMessagesForHgt012(messagesCopy, keepToolRounds);
+				messagesCopy.length = 0;
+				messagesCopy.push(...next);
+				estCt = JSON.stringify(messagesCopy).length;
+				this.logService.info(`[GLMChatService] HGT-012: compacted stale tool messages, est=${estCt}`);
+			}
+			if (estCt > ctxWarnCt) {
+				this.logService.warn(`[GLMChatService] HGT-012: completeChatTurn 估计上下文 ${estCt} 字符 > 阈值 ${ctxWarnCt}`);
+			}
+		}
+
+		if (enableWebSearch) {
+			const userMessages = messagesCopy.filter(m => m.role === 'user');
+			const lastUserMessage = userMessages[userMessages.length - 1]?.content || '';
+			if (lastUserMessage) {
+				const searchResults = await this.webSearch(lastUserMessage);
+				const systemMessage = messagesCopy.find(m => m.role === 'system');
+				if (searchResults.length > 0) {
+					context.webSearchResults = searchResults;
+					if (systemMessage) {
+						systemMessage.content = `${systemMessage.content}\n\n---\n${this.formatWebSearchAppendix(context.webSearchResults)}`;
+					}
+				} else if (systemMessage) {
+					// HGT-022：非流式路径也要把「0 条」写进 system，避免模型静默编造来源
+					systemMessage.content = `${systemMessage.content}\n\n[系统提示·HGT-022] 本轮联网搜索返回 0 条结果。请在答复中明确说明，并建议用户检查密钥/网络；可基于已有知识回答但须标注不确定性。若用户消息中含具体 http(s) 链接，应优先调用 browse_url 抓取正文；或稍后再试联网。`;
+				}
+			}
+		}
+
+		const requestBody: Record<string, unknown> = {
+			model,
+			messages: messagesCopy,
+			temperature: options?.temperature ?? 0.7,
+			max_tokens: options?.maxTokens ?? 32768,
+			stream: false,
+		};
+
+		if (enableThinking) {
+			requestBody.thinking = { type: 'enabled', budget_tokens: 4096 };
+		}
+
+		const tools: GLMToolDefinition[] = options?.tools || [];
+		if (enableWebSearch && !context.webSearchResults?.length) {
+			tools.push({
+				type: 'web_search',
+				web_search: {
+					enable: true,
+					search_engine: this.getSearchEngine(),
+					search_result: true
+				}
+			});
+		}
+		if (tools.length > 0) {
+			requestBody.tools = tools;
+			requestBody.tool_choice = 'auto';
+		}
+
+		const release = await this.acquireRequestSlot('completeChatTurn');
+		try {
+			if (token?.isCancellationRequested) {
+				throw new Error('Cancelled');
+			}
+			const response = await fetch(this.API_ENDPOINT, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${apiKey}`
+				},
+				body: JSON.stringify(requestBody)
+			});
+			if (!response.ok) {
+				const errData = await response.json().catch(() => ({}));
+				const msg = (errData as { error?: { message?: string } }).error?.message || response.statusText;
+				throw new Error(`API Error: ${response.status} - ${msg}`);
+			}
+			const data = await response.json() as {
+				choices?: Array<{ message?: { role?: string; content?: string | null; tool_calls?: GLMToolCall[] } }>;
+			};
+			const msg = data.choices?.[0]?.message;
+			if (!msg) {
+				throw new Error('Empty completion response');
+			}
+			return {
+				role: msg.role || 'assistant',
+				content: msg.content ?? undefined,
+				tool_calls: msg.tool_calls,
+			};
+		} finally {
+			release();
+		}
+		} finally {
+			this.harnessTraceService.endTrace();
+		}
 	}
 
 	async *streamChat(
@@ -943,6 +1182,10 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		const model = options?.model || this.getModel();
 		const sessionId = options?.sessionId || this._currentSessionId;
 
+		/** HGT-002：与 completeChatTurn 一致，流式路径也可 grep `[trace=…]` 串联 Agent 工具与上游日志 */
+		const traceId = this.harnessTraceService.beginTrace(`glm:streamChat:${sessionId ?? 'na'}`);
+		try {
+
 		// 重要：创建消息的深拷贝，避免修改原始会话历史
 		const messagesCopy = messages.map(m => ({ ...m }));
 
@@ -950,7 +1193,24 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		const enableThinking = options?.enableThinking ?? this.isThinkingEnabled();
 		const enableWebSearch = options?.enableWebSearch ?? this.isWebSearchEnabled();
 
-		this.logService.info(`[GLMChatService] Chat options: thinking=${enableThinking}, webSearch=${enableWebSearch}, messages=${messagesCopy.length}`);
+		this.logService.info(`[trace=${traceId}] [GLMChatService] streamChat: thinking=${enableThinking}, webSearch=${enableWebSearch}, messages=${messagesCopy.length}`);
+
+		const ctxWarn = this.configurationService.getValue<number>('aiCore.contextEstimatedCharsWarn') ?? 0;
+		const keepToolRounds = this.configurationService.getValue<number>('aiCore.contextKeepStaleToolRounds') ?? 0;
+		if (ctxWarn > 0) {
+			let est = JSON.stringify(messagesCopy).length;
+			if (keepToolRounds > 0 && est > ctxWarn) {
+				const next = compactStaleToolMessagesForHgt012(messagesCopy, keepToolRounds);
+				messagesCopy.length = 0;
+				messagesCopy.push(...next);
+				est = JSON.stringify(messagesCopy).length;
+				this.logService.info(`[GLMChatService] HGT-012: compacted stale tool messages (stream), est=${est}`);
+			}
+			if (est > ctxWarn) {
+				this.logService.warn(`[GLMChatService] HGT-012: 估计上下文 ${est} 字符 > 阈值 ${ctxWarn}`);
+				yield { type: 'thinking', content: `⚠️ 上下文体积较大（约 ${est} 字符，阈值 ${ctxWarn}）。建议摘要历史、清理陈旧工具结果或新开会话。` };
+			}
+		}
 
 		// 如果启用联网搜索，先执行搜索
 		if (enableWebSearch) {
@@ -969,10 +1229,19 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 						webSearchResults: searchResults
 					};
 
-					// 更新系统提示词以包含搜索结果（只修改副本）
+					// 必须把检索结果并入 system，但绝不能覆盖 Sentinel / Agent 专用 system（否则会丢失 ### FILE 等硬性格式）
 					const systemMessage = messagesCopy.find(m => m.role === 'system');
 					if (systemMessage) {
-						systemMessage.content = this.buildSystemPrompt(context, 'chat');
+						systemMessage.content = `${systemMessage.content}\n\n---\n${this.formatWebSearchAppendix(context.webSearchResults)}`;
+					}
+				} else {
+					yield {
+						type: 'thinking',
+						content: '⚠️ 联网搜索未返回条目（HGT-022）：请检查网络/密钥，或改用 browse_url / 关闭联网后重试。',
+					};
+					const systemMessage = messagesCopy.find(m => m.role === 'system');
+					if (systemMessage) {
+						systemMessage.content = `${systemMessage.content}\n\n[HGT-022] 联网 0 条：若用户消息含 http(s) 链接，可调用 browse_url 抓取正文。`;
 					}
 				}
 			}
@@ -983,7 +1252,7 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 			model,
 			messages: messagesCopy,
 			temperature: options?.temperature ?? 0.7,
-			max_tokens: options?.maxTokens ?? 32768, // GLM-4.7 支持 128K，增加输出限制
+			max_tokens: options?.maxTokens ?? 32768, // GLM-5.x 支持大上下文，提高默认输出上限
 			stream: true
 		};
 
@@ -1020,127 +1289,132 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 		this.logService.trace(`[GLMChatService] Request body: ${JSON.stringify(requestBody).slice(0, 500)}...`);
 
 		try {
-			const response = await fetch(this.API_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${apiKey}`
-				},
-				body: JSON.stringify(requestBody)
-			});
+			const release = await this.acquireRequestSlot('streamChat');
+			try {
+				const response = await fetch(this.API_ENDPOINT, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${apiKey}`
+					},
+					body: JSON.stringify(requestBody)
+				});
 
-			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({}));
-				const errorMessage = errorData.error?.message || response.statusText;
-				yield { type: 'error', error: `API Error: ${response.status} - ${errorMessage}` };
-				return;
-			}
-
-			const reader = response.body?.getReader();
-			if (!reader) {
-				yield { type: 'error', error: 'No response body' };
-				return;
-			}
-
-			const decoder = new TextDecoder();
-			let buffer = '';
-			let isInThinkingBlock = false;
-
-			while (true) {
-				if (token?.isCancellationRequested) {
-					reader.cancel();
-					break;
+				if (!response.ok) {
+					const errorData = await response.json().catch(() => ({}));
+					const errorMessage = errorData.error?.message || response.statusText;
+					yield { type: 'error', error: `API Error: ${response.status} - ${errorMessage}` };
+					return;
 				}
 
-				const { done, value } = await reader.read();
-				if (done) {
-					break;
+				const reader = response.body?.getReader();
+				if (!reader) {
+					yield { type: 'error', error: 'No response body' };
+					return;
 				}
 
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() ?? '';
+				const decoder = new TextDecoder();
+				let buffer = '';
+				let isInThinkingBlock = false;
 
-				for (const line of lines) {
-					if (!line.startsWith('data: ')) {
-						continue;
+				while (true) {
+					if (token?.isCancellationRequested) {
+						reader.cancel();
+						break;
 					}
 
-					const data = line.slice(6).trim();
-					if (data === '[DONE]') {
-						yield { type: 'done' };
-						continue;
+					const { done, value } = await reader.read();
+					if (done) {
+						break;
 					}
 
-					try {
-						const parsed = JSON.parse(data);
-						const choice = parsed.choices?.[0];
+					buffer += decoder.decode(value, { stream: true });
+					const lines = buffer.split('\n');
+					buffer = lines.pop() ?? '';
 
-						// 提取并更新缓存统计（上下文缓存功能）
-						if (parsed.usage && sessionId) {
-							this.updateCacheStats(sessionId, parsed.usage);
-						}
-
-						if (!choice) {
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) {
 							continue;
 						}
 
-						const delta = choice.delta;
-
-						// 处理思考内容（深度思考模式）
-						if (delta?.reasoning_content) {
-							if (!isInThinkingBlock) {
-								isInThinkingBlock = true;
-								yield { type: 'thinking', content: '💭 思考中...\n' };
-							}
-							yield { type: 'thinking', content: delta.reasoning_content };
+						const data = line.slice(6).trim();
+						if (data === '[DONE]') {
+							yield { type: 'done' };
+							continue;
 						}
 
-						// 处理工具调用
-						if (delta?.tool_calls) {
-							for (const toolCall of delta.tool_calls) {
-								// 检查是否是 web_search 工具
-								if (toolCall.type === 'web_browser') {
-									yield {
-										type: 'web_search',
-										content: '🔍 正在搜索网络...'
-									};
-								} else {
-									yield {
-										type: 'tool_call',
-										toolCall: {
-											id: toolCall.id || '',
-											type: 'function',
-											function: {
-												name: toolCall.function?.name || '',
-												arguments: toolCall.function?.arguments || ''
+						try {
+							const parsed = JSON.parse(data);
+							const choice = parsed.choices?.[0];
+
+							// 提取并更新缓存统计（上下文缓存功能）
+							if (parsed.usage && sessionId) {
+								this.updateCacheStats(sessionId, parsed.usage);
+							}
+
+							if (!choice) {
+								continue;
+							}
+
+							const delta = choice.delta;
+
+							// 处理思考内容（深度思考模式）
+							if (delta?.reasoning_content) {
+								if (!isInThinkingBlock) {
+									isInThinkingBlock = true;
+									yield { type: 'thinking', content: '💭 思考中...\n' };
+								}
+								yield { type: 'thinking', content: delta.reasoning_content };
+							}
+
+							// 处理工具调用
+							if (delta?.tool_calls) {
+								for (const toolCall of delta.tool_calls) {
+									// 检查是否是 web_search 工具
+									if (toolCall.type === 'web_browser') {
+										yield {
+											type: 'web_search',
+											content: '🔍 正在搜索网络...'
+										};
+									} else {
+										yield {
+											type: 'tool_call',
+											toolCall: {
+												id: toolCall.id || '',
+												type: 'function',
+												function: {
+													name: toolCall.function?.name || '',
+													arguments: toolCall.function?.arguments || ''
+												}
 											}
-										}
-									};
+										};
+									}
 								}
 							}
-						}
 
-						// 处理内容输出
-						if (delta?.content) {
-							if (isInThinkingBlock) {
-								isInThinkingBlock = false;
-								yield { type: 'content', content: '\n\n---\n\n' };
+							// 处理内容输出
+							if (delta?.content) {
+								if (isInThinkingBlock) {
+									isInThinkingBlock = false;
+									yield { type: 'content', content: '\n\n---\n\n' };
+								}
+								yield { type: 'content', content: delta.content };
 							}
-							yield { type: 'content', content: delta.content };
-						}
 
-						// 检测是否因 token 限制而中断
-						const finishReason = choice.finish_reason;
-						if (finishReason === 'length') {
-							this.logService.warn('[GLMChatService] Response truncated due to token limit, signaling continuation needed');
-							yield { type: 'truncated', reason: 'length' };
-						}
+							// 检测是否因 token 限制而中断
+							const finishReason = choice.finish_reason;
+							if (finishReason === 'length') {
+								this.logService.warn('[GLMChatService] Response truncated due to token limit, signaling continuation needed');
+								yield { type: 'truncated', reason: 'length' };
+							}
 
-					} catch {
-						// 忽略解析错误
+						} catch {
+							// 忽略解析错误
+						}
 					}
 				}
+			} finally {
+				release();
 			}
 
 		} catch (error) {
@@ -1148,6 +1422,10 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 				return;
 			}
 			yield { type: 'error', error: String(error) };
+		}
+		} finally {
+			this.harnessTraceService.endTrace();
+			this.logService.info(`[trace=${traceId}] [GLMChatService] streamChat end`);
 		}
 	}
 
@@ -1190,7 +1468,7 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 			// 准备续接请求
 			continuationCount++;
 			if (continuationCount > maxContinuations) {
-				yield { type: 'content', content: '\n\n⚠️ 回复过长，已达到续接上限。' };
+				yield { type: 'thinking', content: '\n\n⚠️ 回复过长，已达到续接上限。' };
 				break;
 			}
 
@@ -1201,7 +1479,8 @@ export class GLMChatService extends Disposable implements IGLMChatService {
 				{ role: 'user', content: '请继续你的回答。' }
 			];
 
-			yield { type: 'content', content: '\n\n*[继续生成中...]*\n\n' };
+			// 使用 thinking，避免污染需要拼接的正文（如 Sentinel ### FILE 物化）
+			yield { type: 'thinking', content: '*[继续生成中...]*\n' };
 		}
 	}
 }

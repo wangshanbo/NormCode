@@ -1,0 +1,19 @@
+{
+	"enabled": true,
+	"stagingWrites": true,
+	"negotiationRequired": true,
+	"adrGate": true,
+	"strictVerification": true,
+	"autoRun": true,
+	"skipUserConfirmation": true,
+	"promoteAfterVerified": true,
+	"statelessExecution": true,
+	"reviewerIsolation": true,
+	"implementationPlanRequired": true,
+	"mcpAllowlistFile": ".sentinel/mcp_allowlist.json",
+	"gitSnapshots": true,
+	"autoRollbackOnVerifyFailure": true,
+	"verifyPackageScripts": true,
+	"hintNpmScripts": true,
+	"exportBundleOnComplete": true
+}

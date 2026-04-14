@@ -13,6 +13,9 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { GLMChatContext, GLMMessage, IGLMChatService } from './glmChatService.js';
+import { IModelRouterService, ModelTier } from './modelRouterService.js';
+import { IRedTeamService } from './redTeamService.js';
+import { ILSPFeedbackService } from './lspFeedbackService.js';
 
 export const ISubagentOrchestratorService = createDecorator<ISubagentOrchestratorService>('ISubagentOrchestratorService');
 
@@ -70,9 +73,13 @@ export class SubagentOrchestratorService extends Disposable implements ISubagent
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
-		@IGLMChatService private readonly glmChatService: IGLMChatService
+		@IGLMChatService private readonly glmChatService: IGLMChatService,
+		@IModelRouterService private readonly modelRouter: IModelRouterService,
+		@IRedTeamService private readonly redTeamService: IRedTeamService,
+		@ILSPFeedbackService _lspFeedback: ILSPFeedbackService,
 	) {
 		super();
+		void _lspFeedback;
 	}
 
 	isEnabled(): boolean {
@@ -189,9 +196,20 @@ export class SubagentOrchestratorService extends Disposable implements ISubagent
 		}
 		run.messages.push({ role: 'user', content: task });
 
+		// TCE 路由：如果没有显式指定模型，则通过 ModelRouter 自动选择
+		let resolvedModel = extra?.options?.model || (def.model !== 'inherit' ? def.model : undefined);
+		if (!resolvedModel) {
+			const affectedFiles = context.files.map(f => f.path);
+			const routing = this.modelRouter.routeTask(task, affectedFiles);
+			resolvedModel = routing.model.id;
+			this.logService.info(
+				`[SubagentOrchestrator] Auto-routed "${def.name}" → ${routing.model.name} (TCI=${routing.tci.score})`
+			);
+		}
+
 		let content = '';
 		const stream = this.glmChatService.streamChatWithContinuation(run.messages, context, {
-			model: extra?.options?.model || (def.model !== 'inherit' ? def.model : undefined),
+			model: resolvedModel,
 			enableThinking: extra?.options?.enableThinking !== undefined ? extra.options.enableThinking : true,
 			enableWebSearch: extra?.options?.enableWebSearch !== undefined ? extra.options.enableWebSearch : true,
 			maxTokens: extra?.options?.maxTokens || 16384
@@ -206,6 +224,38 @@ export class SubagentOrchestratorService extends Disposable implements ISubagent
 		run.lastUsedAt = new Date();
 		run.messages.push({ role: 'assistant', content });
 		this._runs.set(run.agentId, run);
+
+		// 记录 Token 消耗
+		const inputTokens = run.messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+		const resolvedTier = resolvedModel?.includes('flash') ? ModelTier.Tier1_Fast
+			: resolvedModel?.includes('5') ? ModelTier.Tier3_Power
+			: ModelTier.Tier2_Balanced;
+		this.modelRouter.recordCost(run.agentId, resolvedModel || 'unknown', resolvedTier, inputTokens, content.length);
+
+		// 对抗性审查：如果是 implementation-agent 且内容含代码块，自动触发 Red-Team
+		if (def.name === 'implementation-agent' && content.includes('```') && !def.readonly) {
+			try {
+				const codeMatch = content.match(/```(?:\w+)?\s*([\s\S]*?)```/);
+				if (codeMatch) {
+					this.logService.info('[SubagentOrchestrator] Triggering Red-Team review on implementation output...');
+					const review = await this.redTeamService.review(
+						codeMatch[1],
+						context.files[0]?.path || 'unknown',
+						task,
+					);
+					if (!review.approved) {
+						content += `\n\n---\n⚠️ **Red-Team Reviewer** found ${review.vulnerabilities.length} issue(s):\n`;
+						for (const v of review.vulnerabilities) {
+							content += `- [${v.severity.toUpperCase()}] ${v.title}: ${v.description}\n`;
+						}
+					} else {
+						content += `\n\n---\n✅ **Red-Team Reviewer**: Code passed adversarial review.`;
+					}
+				}
+			} catch (error) {
+				this.logService.warn(`[SubagentOrchestrator] Red-Team review failed: ${String(error)}`);
+			}
+		}
 
 		return {
 			agentId: run.agentId,
@@ -376,6 +426,8 @@ is_background: false
 1. 先给出变更方案和影响面。
 2. 优先最小改动，保持兼容性。
 3. 输出包含：实施步骤、关键改动、验证建议、潜在风险。
+4. 多文件 ESM/TS 等场景：确保每个被 import 的符号在目标模块中有对应 export；静态 HTML+JS 优先使用 \`export const x =\` 等明确导出。
+5. 交付后建议由用户或流水线调用 adversarial-verifier（\`/adversarial-verifier\`）做一次全量对抗审核。
 `
 			},
 			{
@@ -395,6 +447,54 @@ is_background: false
 1. 先定义目标、约束、验收标准。
 2. 提供 2-3 个方案并给出 trade-off。
 3. 输出分阶段计划、风险清单与回滚策略。
+`
+			},
+			{
+				fileName: 'adversarial-verifier.md',
+				content: `---
+name: adversarial-verifier
+description: 全量代码审核子代理。与实现者隔离，对任意语言/框架产物做对抗式审查（ESM、构建、类型、安全、可运行性）。use proactively
+model: inherit
+readonly: true
+is_background: false
+---
+
+你是 adversarial-verifier（独立审核员），与写代码的代理**目标不同**：你的职责是**全量找问题**，不是替实现者辩护。
+
+## 适用范围
+
+工作区可能是：纯静态 HTML+JS、Vue/React/Svelte、Node、Python、Go、Rust、移动端等。**禁止**假设只有一种技术栈；先根据目录与入口文件判断栈，再按下列维度审查**实际存在的文件**。
+
+## 必审维度（按项目存在则检查）
+
+1. **模块与导出一致性**
+   - JS/TS：ESM \`import\`/\`export\` 是否一一对应；是否误用仅 \`script\` 而无 \`export\`；CJS vs ESM 混用是否会导致运行时失败。
+   - Python：\`__init__.py\`、包路径、相对导入是否可达。
+   - 其他语言：包声明、可见性、循环依赖风险。
+
+2. **可运行性与入口**
+   - 是否有明确入口（index.html、main.ts、app.py、cmd/main 等）；本地启动命令是否合理；是否需要 HTTP 而非 file://（如 ES Module）。
+
+3. **构建与类型**
+   - 若存在 tsconfig/eslint/package.json：配置是否与目录结构一致；类型/ Lint 是否会在 CI 中失败。
+
+4. **配置与密钥**
+   - 是否误提交密钥；环境变量文档是否足够。
+
+5. **安全基线**
+   - 注入、XSS、路径穿越、依赖已知漏洞（根据栈择要）。
+
+6. **需求与验收**
+   - 对照用户目标：功能是否可能未实现或仅部分实现；边界情况。
+
+## 输出格式（强制）
+
+- ## 审查结论: [PASS | WARN | BLOCK]
+- ## 阻塞项（若有）：文件路径 + 原因 + 建议修复
+- ## 非阻塞问题
+- ## 建议的验证步骤（含：若适用则写「在浏览器/终端应观察到…」）
+
+若信息不足，先列出**最小假设**，再在 WARN 下说明需补充的文件或命令。
 `
 			}
 		];

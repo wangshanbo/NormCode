@@ -284,6 +284,19 @@ export interface IChatCommandButton {
 	kind: 'command';
 }
 
+export interface IChatModeSelectionCard {
+	kind: 'modeSelectionCard';
+	currentMode: 'vibe' | 'spec';
+	session?: {
+		id: string;
+		phase: string;
+		completed: number;
+		total: number;
+		pending: number;
+		progressPercent: number;
+	};
+}
+
 export interface IChatMoveMessage {
 	uri: URI;
 	range: IRange;
@@ -837,6 +850,7 @@ export type IChatProgress =
 	| IChatTask
 	| IChatTaskResult
 	| IChatCommandButton
+	| IChatModeSelectionCard
 	| IChatWarningMessage
 	| IChatTextEdit
 	| IChatNotebookEdit

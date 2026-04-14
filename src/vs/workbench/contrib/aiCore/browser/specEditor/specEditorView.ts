@@ -93,6 +93,7 @@ export class SpecEditorViewModel extends Disposable {
 		if (!task) return;
 
 		this._state.executingTaskId = taskId;
+		this.specModeService.startTask(taskId);
 		this._onDidChangeState.fire(this._state);
 
 		try {
@@ -103,6 +104,8 @@ export class SpecEditorViewModel extends Disposable {
 				// 更新已修改的文件列表
 				// TODO: 从 result 中提取文件列表
 				this._state.elapsedTime = Date.now() - startTime;
+			} else {
+				this.specModeService.failTask(taskId, result.result);
 			}
 		} finally {
 			this._state.executingTaskId = undefined;

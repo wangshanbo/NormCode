@@ -1,0 +1,8 @@
+{
+	"_comment": "复制为工作区 .sentinel/mcp_allowlist.json。definitions 需与你在 Cursor/VS Code 中已安装的 MCP 一致；若全局已有同名 server，可只填 servers 数组。",
+	"syncChatMcpAccess": true,
+	"servers": [
+		"cursor-ide-browser"
+	],
+	"definitions": {}
+}

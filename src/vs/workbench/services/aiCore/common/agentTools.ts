@@ -129,6 +129,8 @@ export const AGENT_TOOL_NAMES = {
 	// 网页访问工具
 	BROWSE_URL: 'browse_url',
 	WEB_SEARCH: 'web_search_deep',
+	/** 调用工作区 MCP allowlist 内的工具（如 cursor-ide-browser） */
+	MCP_CALL: 'mcp_call',
 } as const;
 
 // ============================================================================

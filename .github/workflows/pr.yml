@@ -81,6 +81,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # PR-3 / HGT-001：最小回归（fixture + npm run build），不依赖完整 node_modules
+  harness-eval:
+    name: Sentinel harness-eval
+    runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-ubuntu-22.04-x64 ]
+    steps:
+      - name: Checkout microsoft/vscode
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Harness eval (--full)
+        run: node scripts/harness-eval/run.mjs --full
+
   linux-cli-tests:
     name: Linux
     uses: ./.github/workflows/pr-linux-cli-test.yml

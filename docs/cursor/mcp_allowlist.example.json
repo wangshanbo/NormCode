@@ -1,0 +1,6 @@
+{
+	"servers": [
+		"filesystem-readonly",
+		"git"
+	]
+}

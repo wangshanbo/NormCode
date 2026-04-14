@@ -36,43 +36,43 @@ configurationRegistry.registerConfiguration({
 		'aiCore.useGLM': {
 			type: 'boolean',
 			default: true,
-			description: localize('aiCore.useGLM', 'Use GLM-4.7 as the default AI model (bypasses GitHub Copilot login)')
+			description: localize('aiCore.useGLM', 'Use GLM-5.x as the default AI model (bypasses GitHub Copilot login)')
 		},
 		'aiCore.glmApiKey': {
 			type: 'string',
 			default: '',
-			description: localize('aiCore.glmApiKey', 'API Key for GLM-4.7 (leave empty to use built-in key)')
+			description: localize('aiCore.glmApiKey', 'API Key for GLM (leave empty to use built-in key)')
 		},
 		'aiCore.glmModel': {
 			type: 'string',
-			default: 'glm-4.7',
-			enum: ['glm-5', 'glm-4.7', 'glm-4.5-air', 'glm-4.7-flash', 'glm-4.6v', 'glm-4.6v-flashx', 'glm-4.6v-flash', 'glm-4-plus', 'glm-4-air', 'glm-4-flash'],
-			description: localize('aiCore.glmModel', 'GLM model to use')
+			default: 'glm-5.1',
+			enum: ['glm-5.1', 'glm-5'],
+			description: localize('aiCore.glmModel', 'GLM chat model (only glm-5 and glm-5.1 are supported)')
 		},
 		'aiCore.enableAutoModelRouting': {
 			type: 'boolean',
 			default: true,
-			description: localize('aiCore.enableAutoModelRouting', 'Use GLM-5 as a pre-router to auto-analyze task complexity and assign sub-agent/model for each user query')
+			description: localize('aiCore.enableAutoModelRouting', 'Use GLM-5.1 as a pre-router to auto-analyze task complexity and assign sub-agent/model for each user query')
 		},
 		'aiCore.routingModelSimple': {
 			type: 'string',
-			default: 'glm-4.7-flash',
+			default: 'glm-5.1',
 			description: localize('aiCore.routingModelSimple', 'Model used for simple tasks (quick responder sub-agent)')
 		},
 		'aiCore.routingModelMedium': {
 			type: 'string',
-			default: 'glm-4.7',
+			default: 'glm-5.1',
 			description: localize('aiCore.routingModelMedium', 'Model used for medium tasks (implementation sub-agent)')
 		},
 		'aiCore.routingModelHard': {
 			type: 'string',
-			default: 'glm-5',
+			default: 'glm-5.1',
 			description: localize('aiCore.routingModelHard', 'Model used for hard tasks (planning sub-agent)')
 		},
 		'aiCore.enableVisionRouting': {
 			type: 'boolean',
 			default: true,
-			description: localize('aiCore.enableVisionRouting', 'Enable visual-task detection and automatic routing to GLM-4.6V series models when image/video/document understanding is needed')
+			description: localize('aiCore.enableVisionRouting', 'Enable visual-task detection and route vision workloads to configured GLM-5.x vision-capable models')
 		},
 		'aiCore.enableSubagents': {
 			type: 'boolean',
@@ -98,18 +98,43 @@ configurationRegistry.registerConfiguration({
 		},
 		'aiCore.routingVisionModelSimple': {
 			type: 'string',
-			default: 'glm-4.6v-flash',
-			description: localize('aiCore.routingVisionModelSimple', 'Vision model for simple visual tasks')
+			default: 'glm-5',
+			description: localize('aiCore.routingVisionModelSimple', 'Vision model for simple visual tasks (glm-5 or glm-5.1)')
 		},
 		'aiCore.routingVisionModelMedium': {
 			type: 'string',
-			default: 'glm-4.6v-flashx',
-			description: localize('aiCore.routingVisionModelMedium', 'Vision model for medium visual tasks')
+			default: 'glm-5.1',
+			description: localize('aiCore.routingVisionModelMedium', 'Vision model for medium visual tasks (glm-5 or glm-5.1)')
 		},
 		'aiCore.routingVisionModelHard': {
 			type: 'string',
-			default: 'glm-4.6v',
-			description: localize('aiCore.routingVisionModelHard', 'Vision model for hard visual tasks')
+			default: 'glm-5.1',
+			description: localize('aiCore.routingVisionModelHard', 'Vision model for hard visual tasks (glm-5 or glm-5.1)')
+		},
+		'aiCore.projectPreview.url': {
+			type: 'string',
+			default: 'http://localhost:5173',
+			description: localize('aiCore.projectPreview.url', 'Default URL for AI Core: Open Project Preview (e.g. local dev server)')
+		},
+		'aiCore.projectPreview.openBeside': {
+			type: 'boolean',
+			default: true,
+			description: localize('aiCore.projectPreview.openBeside', 'When true, opens the project preview in a group beside the active editor')
+		},
+		'aiCore.crossPlatform.openProjectPreviewAfterSentinelComplete': {
+			type: 'boolean',
+			default: false,
+			description: localize('aiCore.crossPlatform.openPreviewAfterSentinel', 'When true, opens AI Core Project Preview after Sentinel run-all completes (uses project preview URL setting)')
+		},
+		'aiCore.crossPlatform.runNpmBuildGateOnWebExport': {
+			type: 'boolean',
+			default: false,
+			description: localize('aiCore.crossPlatform.runNpmBuildGate', 'Experimental: run npm run build in workspace after web export (slow)')
+		},
+		'aiCore.sentinel.desktopNotifyOnNodeComplete': {
+			type: 'boolean',
+			default: false,
+			description: localize('aiCore.sentinel.desktopNotifyOnNodeComplete', 'Show a system notification when each Sentinel node run finishes (title, duration, blocked/failed hint).')
 		},
 		'aiCore.agentMode': {
 			type: 'boolean',
@@ -139,12 +164,22 @@ configurationRegistry.registerConfiguration({
 		'aiCore.enableThinking': {
 			type: 'boolean',
 			default: true,
-			description: localize('aiCore.enableThinking', 'Enable deep thinking mode for complex reasoning tasks (GLM-4.7)')
+			description: localize('aiCore.enableThinking', 'Enable deep thinking mode for complex reasoning tasks (GLM-5.x)')
 		},
 		'aiCore.enableWebSearch': {
 			type: 'boolean',
 			default: true,
 			description: localize('aiCore.enableWebSearch', 'Enable web search to get real-time information from the internet (always enabled)')
+		},
+		'aiCore.contextEstimatedCharsWarn': {
+			type: 'number',
+			default: 0,
+			markdownDescription: 'HGT-012：当序列化后的聊天消息（JSON）字符数超过此值时记录告警并在流式会话中提示（0=关闭）。仅为粗略估计。'
+		},
+		'aiCore.contextKeepStaleToolRounds': {
+			type: 'number',
+			default: 0,
+			markdownDescription: 'HGT-012：当估计字符数已超过「上下文告警阈值」时，仅保留最近 N 条 role=tool 的全文，更早的 tool 消息替换为短占位（0=关闭）。需配合 contextEstimatedCharsWarn>0。'
 		},
 		'aiCore.searchEngine': {
 			type: 'string',
@@ -538,8 +573,8 @@ registerAction2(class extends Action2 {
 		super({
 			id: 'aicore.testLLM',
 			title: {
-				value: localize('aicore.testLLM', 'AI Core: Test LLM Connection (GLM-4.7)'),
-				original: 'AI Core: Test LLM Connection (GLM-4.7)'
+				value: localize('aicore.testLLM', 'AI Core: Test LLM Connection (GLM-5.1)'),
+				original: 'AI Core: Test LLM Connection (GLM-5.1)'
 			},
 			menu: [{ id: MenuId.CommandPalette }]
 		});
@@ -550,7 +585,7 @@ registerAction2(class extends Action2 {
 		const notificationService = accessor.get(INotificationService);
 		const logService = accessor.get(ILogService);
 
-		notificationService.info(localize('aicore.testingLLM', 'Testing GLM-4.7 connection...'));
+		notificationService.info(localize('aicore.testingLLM', 'Testing GLM connection...'));
 
 		try {
 			const response = await llmService.chat({
@@ -566,11 +601,11 @@ registerAction2(class extends Action2 {
 
 			notificationService.notify({
 				severity: Severity.Info,
-				message: localize('aicore.llmTestSuccess', 'GLM-4.7 Connected! Response: {0}', response.content.slice(0, 100))
+				message: localize('aicore.llmTestSuccess', 'GLM Connected! Response: {0}', response.content.slice(0, 100))
 			});
 		} catch (error) {
 			logService.error(`[LLMService]: Test failed: ${String(error)}`);
-			notificationService.error(localize('aicore.llmTestFailed', 'GLM-4.7 connection failed: {0}', String(error)));
+			notificationService.error(localize('aicore.llmTestFailed', 'GLM connection failed: {0}', String(error)));
 		}
 	}
 });
@@ -583,8 +618,8 @@ registerAction2(class extends Action2 {
 		super({
 			id: 'aicore.quickChat',
 			title: {
-				value: localize('aicore.quickChat', 'AI Core: Quick Chat with GLM-4.7'),
-				original: 'AI Core: Quick Chat with GLM-4.7'
+				value: localize('aicore.quickChat', 'AI Core: Quick Chat with GLM-5.x'),
+				original: 'AI Core: Quick Chat with GLM-5.x'
 			},
 			menu: [{ id: MenuId.CommandPalette }]
 		});
@@ -600,9 +635,9 @@ registerAction2(class extends Action2 {
 
 		// 获取用户输入
 		const userInput = await quickInputService.input({
-			placeHolder: localize('aicore.chatPlaceholder', 'Ask GLM-4.7 anything...'),
+			placeHolder: localize('aicore.chatPlaceholder', 'Ask GLM-5.x anything...'),
 			prompt: localize('aicore.chatPrompt', 'Enter your message'),
-			title: localize('aicore.chatTitle', 'Quick Chat with GLM-4.7')
+			title: localize('aicore.chatTitle', 'Quick Chat with GLM-5.x')
 		});
 
 		if (!userInput) {

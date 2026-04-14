@@ -56,7 +56,7 @@ import { IOutputService } from '../../../../services/output/common/output.js';
 import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
 import { IWorkbenchIssueService } from '../../../issue/common/issue.js';
 import { IAgentToolService } from '../../../../services/aiCore/browser/agentToolService.js';
-import { IGLMChatService, GLMMessage, GLMChatContext, GLMTaskRoutingPlan } from '../../../../services/aiCore/browser/glmChatService.js';
+import { IGLMChatService, GLMMessage, GLMChatContext, GLMTaskRoutingPlan, GLMToolDefinition } from '../../../../services/aiCore/browser/glmChatService.js';
 import { ChatResponseHandler, ChatContextCollector } from '../../../../services/aiCore/browser/chatResponseHandler.js';
 import { ISpecModeService } from '../../../../services/aiCore/browser/specModeService.js';
 import { IChatModeService } from '../../../../services/aiCore/browser/chatModeService.js';
@@ -452,7 +452,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	/**
-	 * [AI Core] 使用 GLM-4.7 模型处理 Chat 请求
+	 * [AI Core] 使用 GLM-5.x 模型处理 Chat 请求
 	 * 使用模块化的 GLMChatService 和 ChatResponseHandler
 	 */
 	private async doInvokeWithGLM(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatWidgetService: IChatWidgetService): Promise<IChatAgentResult> {
@@ -480,8 +480,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			chatModeServiceForWelcome.setMode('vibe');
 			progress({
 				kind: 'markdownContent',
-				content: new MarkdownString(`# 💬 Vibe 模式已激活\n\n**边聊边做，快速迭代**\n\n现在可以直接开始编码！我会帮助你：\n- 快速探索和测试想法\n- 实现具体的功能\n- 调试和修复问题\n\n> 💡 如需切换到规划模式，输入 "spec" 或 "规格模式"`)
+				content: new MarkdownString('## 💬 已切换到 Vibe\n\n现在可以直接描述你要实现或修复的内容。')
 			});
+			this.renderModeSelectionUI(progress);
 			return {};
 		}
 
@@ -490,8 +491,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			chatModeServiceForWelcome.setMode('spec');
 			progress({
 				kind: 'markdownContent',
-				content: new MarkdownString(`# 📋 Spec 模式已激活\n\n**先规划，后执行**\n\n请描述你想要构建的功能，我将帮助你：\n\n1. 📝 **需求分析** - 生成结构化用户故事\n2. 🏗️ **技术设计** - 创建架构和序列图\n3. ✅ **任务执行** - 逐步实现并跟踪进度\n\n---\n\n**开始吧！** 请输入你的需求，例如：\n\n> "我想要一个用户登录系统，支持邮箱和手机号登录"\n\n> 💡 如需切换到快速模式，输入 "vibe" 或 "快速模式"`)
+				content: new MarkdownString('## 📋 已切换到 Spec\n\n请直接描述需求，我将生成 requirements / design / tasks 并执行。')
 			});
+			this.renderModeSelectionUI(progress);
 			return {};
 		}
 
@@ -504,10 +506,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 					return undefined;
 				}
 			});
-			progress({
-				kind: 'markdownContent',
-				content: new MarkdownString(this.getModeSelectionCard(specModeServiceForCard?.getCurrentSession()))
-			});
+			this.renderModeSelectionUI(progress, specModeServiceForCard?.getCurrentSession());
 			return {};
 		}
 
@@ -520,10 +519,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 					return undefined;
 				}
 			});
-			progress({
-				kind: 'markdownContent',
-				content: new MarkdownString(this.getModeSelectionCard(specModeServiceForCard?.getCurrentSession()))
-			});
+			this.renderModeSelectionUI(progress, specModeServiceForCard?.getCurrentSession());
 			return {};
 		}
 		const isAgentMode = this.configurationService.getValue<boolean>('aiCore.agentMode') !== false;
@@ -579,8 +575,8 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			}
 		});
 
-		// 获取当前 Chat 模式 (Vibe/Spec)
-		const chatMode = this.configurationService.getValue<'vibe' | 'spec'>('aiCore.defaultChatMode') || 'vibe';
+		// 获取当前 Chat 模式 (Vibe/Spec) - 必须使用实时模式，不能用默认配置值
+		const chatMode = (chatModeService.getCurrentMode() === 'spec' ? 'spec' : 'vibe');
 
 		// 创建响应处理器
 		const responseHandler = new ChatResponseHandler(
@@ -592,7 +588,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		let subagentDelegationContext = '';
 
 		try {
-			// 获取深度思考和联网搜索设置（会被 GLM-5 路由器动态覆盖）
+			// 获取深度思考和联网搜索设置（会被 GLM-5.1 路由器动态覆盖）
 			let enableThinking = glmService.isThinkingEnabled();
 			let enableWebSearch = glmService.isWebSearchEnabled();
 			let selectedModel: string | undefined = undefined;
@@ -623,12 +619,23 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 				}
 			}
 
-			// 每次提问都先用 GLM-5 做任务分析，再自动分配子代理/模型
+			const isErrorFixRequest = this.isErrorFixRequest(processedMessage, context);
+
+			// 每次提问都先用 GLM-5.1 做任务分析，再自动分配子代理/模型
 			const routingPlan = await glmService.analyzeTaskAndRoute(processedMessage, context, chatMode, isAgentMode);
 			selectedModel = routingPlan.model;
 			selectedMaxTokens = routingPlan.maxTokens;
 			enableThinking = routingPlan.enableThinking;
 			enableWebSearch = routingPlan.enableWebSearch;
+
+			// 报错/异常修复请求：强制提升到最强模型，避免被路由到低级模型
+			if (isErrorFixRequest) {
+				selectedModel = 'glm-5.1';
+				selectedMaxTokens = Math.max(selectedMaxTokens ?? 0, 32768);
+				enableThinking = true;
+				enableWebSearch = true;
+				this.logService.warn('[AI Core Router] Error-fix request detected, force model=glm-5.1');
+			}
 			this.logService.info(
 				`[AI Core Router] subAgent=${routingPlan.subAgent}, complexity=${routingPlan.complexity}, model=${routingPlan.model}, thinking=${routingPlan.enableThinking}, webSearch=${routingPlan.enableWebSearch}, maxTokens=${routingPlan.maxTokens}, confidence=${routingPlan.confidence}, reason=${routingPlan.reason}`
 			);
@@ -664,7 +671,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 						content: new MarkdownString(
 							`## 🚀 强制 Autopilot 执行\n\n` +
 							`检测到执行意图，已跳过对话拉扯并直接执行剩余任务。\n\n` +
-							`${forceStrongModel ? '⚡ 触发防呆熔断器，本轮已强制切换最强模型 **glm-5**。\n\n' : ''}`
+							`${forceStrongModel ? '⚡ 触发防呆熔断器，本轮已强制切换最强模型 **glm-5.1**。\n\n' : ''}`
 						)
 					});
 					await this.executeSpecTasksWithAutopilotWorkers(
@@ -686,7 +693,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 				try {
 					progress({
 						kind: 'progressMessage',
-						content: new MarkdownString(`🧠 已路由到子代理：${routingPlan.subAgent}，正在分析...`)
+						content: new MarkdownString(`🧠 已路由到子代理：${routingPlan.subAgent}，正在分析...${isErrorFixRequest ? '（错误修复：已强制 glm-5.1）' : ''}`)
 					});
 					const delegated = await subagentService.runRoutedSubagent(
 						routingPlan.subAgent,
@@ -725,7 +732,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
 			this.logService.info(`[AI Core] Dev detection: message="${userMessage.slice(0, 50)}...", isDevRequest=${isDevRequest}, isExplicitSpec=${isExplicitSpec}`);
 
-			if (isExplicitSpec || isDevRequest) {
+			// Vibe 模式下，报错修复请求必须留在 Vibe，不得自动拉到 Spec
+			const shouldAutoSwitchToSpec = isExplicitSpec || (isDevRequest && !isErrorFixRequest);
+			if (shouldAutoSwitchToSpec) {
 				// 🚀 真正的 Agent 模式 - Autopilot 自动执行
 				const executionMode = this.configurationService.getValue<'autopilot' | 'supervised'>('aiCore.executionMode') || 'autopilot';
 
@@ -834,8 +843,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			}
 
 			// 获取工具定义（如果是 Agent 模式）
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const tools = isAgentMode ? agentToolService.getToolsForGLM() as any : undefined;
+			const tools = isAgentMode ? agentToolService.getToolsForGLM() as GLMToolDefinition[] : undefined;
 
 			// 检查是否有现有会话，没有则创建（保持对话上下文）
 			let currentSession = glmService.getCurrentSession();
@@ -1275,6 +1283,32 @@ ${profile.topLevelDirSourceCounts.map(e => `- ${e.name}: ${e.sourceFiles}`).join
 	}
 
 	/**
+	 * 检测是否为“报错修复”类型请求（应保留在 Vibe，并强制最强模型）
+	 */
+	private isErrorFixRequest(message: string, context: GLMChatContext): boolean {
+		const lower = message.toLowerCase();
+		const hasErrorKeyword = [
+			'报错', '错误', '异常', '修复', '失败', '崩溃', '堆栈', '日志',
+			'error', 'exception', 'traceback', 'stack trace', 'failed', 'fix', 'bug', 'crash', 'enoent'
+		].some(k => lower.includes(k));
+
+		const hasErrorShape =
+			lower.includes('tsconfig') ||
+			lower.includes('npm ') ||
+			lower.includes('vite') ||
+			lower.includes('enoent') ||
+			lower.includes('at ') ||
+			/error[:\s]/i.test(message) ||
+			/failed[:\s]/i.test(message);
+
+		const hasCodeContext = context.files.length > 0 || /```[\s\S]*```/.test(message);
+
+		const result = hasErrorKeyword && (hasErrorShape || hasCodeContext);
+		this.logService.info(`[AI Core] isErrorFixRequest: keyword=${hasErrorKeyword}, shape=${hasErrorShape}, codeCtx=${hasCodeContext}, result=${result}`);
+		return result;
+	}
+
+	/**
 	 * 🚀 Autopilot 模式 - 全自动执行开发流程
 	 * 类似 Kiro 的 Autopilot，自动完成：规划 → 设计 → 任务 → 代码生成
 	 */
@@ -1455,15 +1489,24 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 				async () => {
 					// 收集 LLM 响应
 					let responseContent = '';
+					let streamError: string | undefined;
 					for await (const event of glmService.streamChat(messages, context, {
 						model: taskRouting?.model,
 						maxTokens: taskRouting?.maxTokens || 16384,
-						enableThinking: taskRouting ? taskRouting.enableThinking : true,
-						enableWebSearch: taskRouting ? taskRouting.enableWebSearch : true
+						temperature: 0.2,
+						enableThinking: taskRouting ? taskRouting.enableThinking : false,
+						enableWebSearch: taskRouting ? taskRouting.enableWebSearch : false
 					})) {
 						if (event.type === 'content' && event.content) {
 							responseContent += event.content;
 						}
+						if (event.type === 'error' && event.error) {
+							streamError = event.error;
+						}
+					}
+
+					if (streamError) {
+						throw new Error(streamError);
 					}
 
 					// P0.1 - 使用增强的 JSON 解析
@@ -1535,6 +1578,36 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 		}
 	}
 
+	private isStructuredExecutionTask(task: SpecTask): boolean {
+		const signal = `${task.type} ${task.title} ${task.description}`.toLowerCase();
+		return /implementation|test|documentation|refactor|fix|实现|编写|创建|新增|重构|修复|测试|文档|部署/.test(signal);
+	}
+
+	private stabilizeTaskRouting(task: SpecTask, routing: GLMTaskRoutingPlan): GLMTaskRoutingPlan {
+		const stabilized: GLMTaskRoutingPlan = {
+			...routing,
+			enableThinking: false,
+			enableWebSearch: false
+		};
+
+		if (!this.isStructuredExecutionTask(task)) {
+			return stabilized;
+		}
+
+		const mediumModel = this.configurationService.getValue<string>('aiCore.routingModelMedium') || 'glm-5.1';
+		if (stabilized.complexity === 'simple' || stabilized.subAgent === 'quick_responder' || /flash/i.test(stabilized.model)) {
+			return {
+				...stabilized,
+				complexity: 'medium',
+				subAgent: 'implementation_agent',
+				model: mediumModel,
+				maxTokens: Math.max(16384, stabilized.maxTokens)
+			};
+		}
+
+		return stabilized;
+	}
+
 	private async executeSpecTasksWithAutopilotWorkers(
 		tasks: SpecTask[],
 		context: GLMChatContext,
@@ -1565,8 +1638,8 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 		progress({
 			kind: 'progressMessage',
 			content: new MarkdownString(
-				`🤖 任务执行模式：${workerCount > 1 ? `并行子代理 x${workerCount}` : '串行执行'}（每任务 GLM-5 路由）` +
-				`${forceStrongModel ? ' ｜ ⚡ 强制 glm-5' : ''}`
+				`🤖 任务执行模式：${workerCount > 1 ? `并行子代理 x${workerCount}` : '串行执行'}（每任务 GLM-5.1 路由）` +
+				`${forceStrongModel ? ' ｜ ⚡ 强制 glm-5.1' : ''}`
 			)
 		});
 
@@ -1592,12 +1665,12 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 					const effectiveRouting: GLMTaskRoutingPlan = forceStrongModel
 						? {
 							...routing,
-							model: 'glm-5',
+							model: 'glm-5.1',
 							enableThinking: true,
 							enableWebSearch: true,
 							maxTokens: Math.max(32768, routing.maxTokens)
 						}
-						: routing;
+						: this.stabilizeTaskRouting(task, routing);
 					const complexityLabel = effectiveRouting.complexity === 'simple' ? '简单任务' : effectiveRouting.complexity === 'medium' ? '一般任务' : '复杂任务';
 					progress({
 						kind: 'markdownContent',
@@ -2270,10 +2343,11 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 				});
 			}
 		} else {
-			// 显示带可点击按钮的任务列表
+			// 显示可操作的模式区 + 任务列表
 			const session = specService.getCurrentSession();
 			if (session) {
-				const content = this.getModeSelectionCard(session) + '\n\n' + this.formatTaskListWithButtons(session);
+				this.renderModeSelectionUI(progress, session);
+				const content = this.formatTaskListWithButtons(session);
 				progress({
 					kind: 'markdownContent',
 					content: new MarkdownString(content, { isTrusted: true })
@@ -2283,48 +2357,28 @@ ${additionalGuidance ? `\n## 子代理执行建议\n${additionalGuidance}\n` : '
 	}
 
 	// ============================================================================
-	// 模式选择卡片 (Kiro 风格)
+	// 模式选择 UI（组件化按钮 + 简要说明，替代大段 Markdown 表格）
 	// ============================================================================
 
-	private getModeSelectionCard(session?: SpecSession): string {
-		const hasSession = Boolean(session);
+	private renderModeSelectionUI(progress: (part: IChatProgress) => void, session?: SpecSession): void {
 		const completed = session?.tasks.filter(t => t.status === 'completed').length || 0;
 		const total = session?.tasks.length || 0;
 		const pending = Math.max(0, total - completed);
 		const progressPercent = total > 0 ? Math.round((completed / total) * 100) : 0;
-		const sessionBlock = hasSession ? `
----
-
-## 📌 Spec 工作台（同页）
-
-| 项目 | 状态 |
-|------|------|
-| 会话 | \`${session?.id}\` |
-| 阶段 | ${session?.phase} |
-| 任务进度 | ${completed}/${total}（${progressPercent}%） |
-| 待执行 | ${pending} |
-
-> 输入 **"继续"** 可直接执行下一个任务；输入 **"执行所有"** 可并行自动执行。
-` : '';
-
-		return `# ✨ Let's build
-
-同一个 Chat 页面内完成 **Vibe / Spec** 全流程（不再拆分多个顶部入口）。
-
-## 💬 Vibe
-- Chat first, then build
-- 适合快速探索、调试、迭代实现
-- 输入 \`vibe\` 切换
-
-## 📋 Spec
-- Plan first, then build
-- 自动生成 requirements / design / tasks 并执行
-- 输入 \`spec\` 切换
-${sessionBlock}
-
----
-
-> 💡 快捷：\`vibe\` / \`spec\` / \`继续\` / \`执行所有\` / \`检查完成\``;
+		const chatModeService = this.instantiationService.invokeFunction(accessor => accessor.get(IChatModeService));
+		const currentMode = chatModeService.getCurrentMode() === 'spec' ? 'spec' : 'vibe';
+		progress({
+			kind: 'modeSelectionCard',
+			currentMode,
+			session: session ? {
+				id: session.id,
+				phase: session.phase,
+				completed,
+				total,
+				pending,
+				progressPercent
+			} : undefined
+		});
 	}
 
 	/**

@@ -31,6 +31,9 @@ function code() {
 
 	# Manage built-in extensions
 	if [[ "$1" == "--builtin" ]]; then
+		# Some parent environments export ELECTRON_RUN_AS_NODE for helper processes.
+		# Unset it before launching the actual Electron app, otherwise Electron boots in Node mode.
+		unset ELECTRON_RUN_AS_NODE
 		exec "$CODE" build/builtin
 		return
 	fi
@@ -48,6 +51,7 @@ function code() {
 	fi
 
 	# Launch Code
+	unset ELECTRON_RUN_AS_NODE
 	exec "$CODE" . $DISABLE_TEST_EXTENSION "$@"
 }
 

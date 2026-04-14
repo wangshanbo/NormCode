@@ -1,0 +1,35 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"$id": "https://sentinel.ide/schemas/adr.schema.json",
+	"title": "Architecture Decision Record",
+	"type": "object",
+	"required": [
+		"logic_path",
+		"dependency_whitelist_check",
+		"potential_risks",
+		"rollback_plan"
+	],
+	"properties": {
+		"logic_path": {
+			"type": "string",
+			"description": "底层逻辑路径，例如 UI -> Service -> Hardware 或 Event -> Middleware -> State -> View",
+			"minLength": 4
+		},
+		"dependency_whitelist_check": {
+			"type": "string",
+			"description": "依赖白名单核对说明：允许哪些第三方库、如何校验",
+			"minLength": 2
+		},
+		"potential_risks": {
+			"type": "string",
+			"description": "潜在风险与缓解",
+			"minLength": 2
+		},
+		"rollback_plan": {
+			"type": "string",
+			"description": "回滚方案",
+			"minLength": 2
+		}
+	},
+	"additionalProperties": true
+}

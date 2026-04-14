@@ -1,0 +1,8 @@
+{
+  "name": "harness-eval-real-app-skeleton",
+  "private": true,
+  "description": "模拟真实业务仓的最小目录：src/、scripts/、dist/ 与 package.json",
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  }
+}

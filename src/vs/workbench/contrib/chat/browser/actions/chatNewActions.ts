@@ -54,17 +54,6 @@ export interface INewEditSessionActionContext {
 
 export function registerNewChatActions() {
 
-	// Add "New Chat" submenu to Chat view menu
-	MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
-		submenu: MenuId.ChatNewMenu,
-		title: localize2('chat.newEdits.label', "New Chat"),
-		icon: Codicon.plus,
-		when: ContextKeyExpr.equals('view', ChatViewId),
-		group: 'navigation',
-		order: -1,
-		isSplitButton: true
-	});
-
 	registerAction2(class NewChatEditorAction extends Action2 {
 		constructor() {
 			super({
@@ -132,11 +121,24 @@ export function registerNewChatActions() {
 
 			const executeCommandContext = args[0] as INewEditSessionActionContext | undefined;
 
-			// Context from toolbar or lastFocusedWidget
-			const context = getEditingSessionContext(accessor, args);
-			const { editingSession, chatWidget: widget } = context ?? {};
+			// Context from toolbar or last focused widget. If none, ensure the view is opened and retry.
+			let context = getEditingSessionContext(accessor, args);
+			let editingSession = context?.editingSession;
+			let widget = context?.chatWidget;
 			if (!widget) {
-				return;
+				const view = await viewsService.openView(ChatViewId) as ChatViewPane;
+				context = getEditingSessionContext(accessor, args);
+				editingSession = context?.editingSession;
+				widget = context?.chatWidget;
+
+				// Final fallback: create a local session directly in the chat view,
+				// then continue through the unified "start" entry flow.
+				if (!widget) {
+					const newResource = getResourceForNewChatSession(localChatSessionType);
+					await view.loadSession(newResource);
+					widget = view.widget;
+					editingSession = undefined;
+				}
 			}
 
 			const dialogService = accessor.get(IDialogService);
@@ -166,6 +168,12 @@ export function registerNewChatActions() {
 			widget.focusInput();
 
 			accessibilityService.alert(localize('newChat', "New chat"));
+
+			// AI Core UX: on a fresh chat in the view pane, auto-trigger the mode card.
+			if (!executeCommandContext?.inputValue && isIChatViewViewContext(widget.viewContext)) {
+				await widget.acceptInput('start', { storeToHistory: false, noCommandDetection: true });
+				return;
+			}
 
 			if (!executeCommandContext) {
 				return;

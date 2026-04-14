@@ -1,0 +1,7 @@
+{
+  "name": "harness-eval-tiny-lib",
+  "private": true,
+  "scripts": {
+    "build": "node ./build.mjs"
+  }
+}

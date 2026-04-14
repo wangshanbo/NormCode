@@ -357,7 +357,7 @@ const routingPlan = await glmService.analyzeTaskAndRoute(
 // {
 //   complexity: 'simple' | 'medium' | 'hard',
 //   subAgent: 'quick_responder' | 'implementation_agent' | 'planning_agent',
-//   model: 'glm-4.7-flash' | 'glm-4.7' | 'glm-5' | 'glm-4.6v*',
+//   model: 'glm-4.7-flash' | 'glm-4.7' | 'glm-5.1' | 'glm-4.6v*',
 //   requiresVision: boolean
 // }
 ```

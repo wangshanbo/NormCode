@@ -144,7 +144,7 @@ CommandsRegistry.registerCommand('aicore.executeTask', async (accessor, args?: {
 	const runResult = await specService.executeTaskWithLLM(task);
 	if (!runResult.success) {
 		specService.failTask(task.id, runResult.result || 'Task execution failed');
-		notificationService.error(localize('spec.taskExecFailed', 'Task execution failed: {0}', task.title));
+		notificationService.error(localize('spec.taskExecFailed', 'Task execution failed: {0}. Reason: {1}', task.title, runResult.result || 'Unknown error'));
 		return;
 	}
 	notificationService.info(localize('spec.taskExecDone', 'Task completed: {0}', task.title));
@@ -245,7 +245,7 @@ CommandsRegistry.registerCommand('aicore.retryTask', async (accessor, args?: { t
 	const runResult = await specService.executeTaskWithLLM(task);
 	if (!runResult.success) {
 		specService.failTask(task.id, runResult.result || 'Task retry failed');
-		notificationService.error(localize('spec.taskRetryFailed', 'Task retry failed: {0}', task.title));
+		notificationService.error(localize('spec.taskRetryFailed', 'Task retry failed: {0}. Reason: {1}', task.title, runResult.result || 'Unknown error'));
 		return;
 	}
 	notificationService.info(localize('spec.taskRetryDone', 'Task completed after retry: {0}', task.title));

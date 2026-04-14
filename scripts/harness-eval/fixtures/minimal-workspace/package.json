@@ -1,0 +1,7 @@
+{
+  "name": "harness-eval-minimal",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"process.exit(0)\""
+  }
+}

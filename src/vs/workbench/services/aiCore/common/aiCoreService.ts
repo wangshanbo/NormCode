@@ -9,6 +9,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IAICoreContextBuilder } from './aiCoreContextBuilder.js';
 import { IAISpecService } from './specService.js';
 import type { AICoreContext, AICoreEdits, AICoreEditResult, AICoreRequest, AICoreResponse, AICoreToolPlan, AICoreToolResult } from './aiCoreTypes.js';
+import { ISentinelProductService } from '../../../sentinel/common/sentinelProductService.js';
 
 export const IAICoreService = createDecorator<IAICoreService>('IAICoreService');
 
@@ -30,7 +31,8 @@ export class AICoreService implements IAICoreService {
 	constructor(
 		@ILogService private readonly logService: ILogService,
 		@IAICoreContextBuilder private readonly contextBuilder: IAICoreContextBuilder,
-		@IAISpecService private readonly specService: IAISpecService
+		@IAISpecService private readonly specService: IAISpecService,
+		@ISentinelProductService private readonly sentinelProductService: ISentinelProductService,
 	) { }
 
 	async sendRequest(req: AICoreRequest): Promise<AICoreResponse> {
@@ -55,10 +57,21 @@ export class AICoreService implements IAICoreService {
 			this.logService.trace(`[AICoreService]: System prompt prefix injected (${specPrefix.length} chars)`);
 		}
 
+		const snapshot = await this.sentinelProductService.ingestPrompt({
+			message: req.message,
+			source: 'aicore',
+			sessionId: req.sessionId,
+		});
+
 		return {
-			content: '',
+			content: [
+				'Sentinel 已接管该请求，并将其转化为 Intent 驱动的执行流程。',
+				`当前阶段：${snapshot.phase}`,
+				`Intent 数量：${snapshot.intents.length}`,
+				`Execution Graph 数量：${snapshot.executionGraphs.length}`,
+			].join('\n'),
 			meta: {
-				source: 'noop',
+				source: 'model',
 				specRulesApplied: rulesCount
 			}
 		};

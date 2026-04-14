@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * LLM Service - 智谱 AI GLM-4.7 模型接入
+ * LLM Service - 智谱 AI GLM-5 / GLM-5.1 模型接入
  * 文档：https://docs.bigmodel.cn/cn/api/introduction
  */
 
@@ -79,7 +79,7 @@ export interface ILLMService {
 const ZHIPU_CONFIG = {
 	baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
 	apiKey: '20cca2b90c8c4348aaab3d4f6814c33b.Ow4WJfqfc06uB4KI',
-	defaultModel: 'glm-4.7',
+	defaultModel: 'glm-5.1',
 	defaultTemperature: 0.7,
 	defaultMaxTokens: 4096
 };
@@ -98,7 +98,7 @@ export class LLMService extends Disposable implements ILLMService {
 		@ILogService private readonly logService: ILogService
 	) {
 		super();
-		this.logService.info('[LLMService]: Initialized with GLM-4.7');
+		this.logService.info('[LLMService]: Initialized with GLM (glm-5 / glm-5.1)');
 	}
 
 	async chat(options: LLMRequestOptions, token?: CancellationToken): Promise<LLMResponse> {

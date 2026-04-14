@@ -25,6 +25,7 @@ export class DynamicEditorConfigurations extends Disposable implements IWorkbenc
 		'terminalEditor',
 		'mainThreadWebview-simpleBrowser.view',
 		'mainThreadWebview-browserPreview',
+		'aicore.projectPreview',
 		'workbench.editor.processExplorer'
 	]);
 
@@ -51,6 +52,11 @@ export class DynamicEditorConfigurations extends Disposable implements IWorkbenc
 		{
 			id: 'mainThreadWebview-browserPreview',
 			label: localize('livePreview', "Live Preview"),
+			priority: RegisteredEditorPriority.builtin
+		},
+		{
+			id: 'aicore.projectPreview',
+			label: localize('projectPreview', "Project Preview"),
 			priority: RegisteredEditorPriority.builtin
 		}
 	];
