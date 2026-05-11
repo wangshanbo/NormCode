@@ -417,8 +417,9 @@ NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 业余时间个人维�
 
 - 🏢 **研发主管 + 硬件采购负责人 @ 台满满科技**，跟随创始人 5+ 年；服务 500+ 球房 / 平台总流水 ¥30 亿 / 10 人研发团队
 - 🧠 **业余月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
-- 🛠️ **跨端全栈**：Vue · React · **Flutter** · TypeScript · Java（存量维护）· Rust（[Guard](https://github.com/wangshanbo/guard)）
-- 🔌 **国内硬件供应链 insider**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类 / 6 家工厂老板直达
+- 🤖 **生产代码 AI workflow 实战**：在公司代码仓库 `.cursor/` 里沉淀完整的 rules + skills SOP，驱动团队 5 个月 ship 50+ feature
+- 🛠️ **跨端全栈 5 端同时跑**：收银端 / 管理端 / 点单机 / 小程序 / 后端，外加 Rust（[Guard](https://github.com/wangshanbo/guard)）/ Flutter
+- 🔌 **国内硬件供应链 insider + 竞品硬件协议反推**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类 / 6 家工厂老板直达；做竞品硬件协议反推让我们能整体迁竞品老客户
 - 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
 
 ### 我为什么造 NormCode
