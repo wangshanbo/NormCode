@@ -415,9 +415,9 @@ const response = await aiCoreService.sendRequest({
 
 NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 业余时间个人维护，36 岁，杭州。
 
-- 🏢 **研发主管 + 硬件采购负责人 @ 台满满科技**，跟随创始人 5+ 年；服务 500+ 球房 / 平台总流水 ¥30 亿 / 10 人研发团队
+- 🏢 **研发主管 + 硬件采购负责人 @ 台满满科技**，入职 2 年；**进公司 2 个月就因执行速度被老板转交硬件采购**；服务 500+ 球房 / 平台总流水 ¥30 亿 / 10 人研发团队
 - 🧠 **业余月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
-- 🤖 **生产代码 AI workflow 实战**：在公司代码仓库 `.cursor/` 里沉淀完整的 rules + skills SOP，驱动团队 5 个月 ship 50+ feature
+- 🤖 **生产代码 AI workflow 实战**：在公司代码仓库 `.cursor/` 里沉淀完整的 rules + skills SOP，驱动团队 5 个月 ship 50+ feature。底层哲学：**用最强模型写 SOP（Opus / GPT-5），用最差但能跑的模型写代码（Haiku / 3.5）；AI 写错 = SOP 不够好，从不归罪于模型**
 - 🛠️ **跨端全栈 5 端同时跑**：收银端 / 管理端 / 点单机 / 小程序 / 后端，外加 Rust（[Guard](https://github.com/wangshanbo/guard)）/ Flutter
 - 🔌 **国内硬件供应链 insider + 竞品硬件协议反推**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类 / 6 家工厂老板直达；做竞品硬件协议反推让我们能整体迁竞品老客户
 - 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
