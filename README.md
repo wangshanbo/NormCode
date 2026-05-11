@@ -1,7 +1,33 @@
-# NormCode - 智能编程 IDE
+<div align="center">
 
-[![GitHub](https://img.shields.io/badge/GitHub-NormCode-blue?logo=github)](https://github.com/wangshanbo/NormCode)
+# 🛡️ NormCode
+
+**An Anthropic-style long-running AI IDE, forked from VS Code**
+
+*VS Code 内核 · Sentinel 长程 Harness · 零配置 MCP · 智谱 GLM 内置 · 端到端交付不依赖 Chat 闲聊*
+
+[![GitHub](https://img.shields.io/badge/GitHub-NormCode-181717?logo=github)](https://github.com/wangshanbo/NormCode)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.txt)
+[![Built on](https://img.shields.io/badge/Built%20on-VS%20Code-007ACC?logo=visualstudiocode)](https://github.com/microsoft/vscode)
+[![AI Engine](https://img.shields.io/badge/AI-%E6%99%BA%E8%B0%B1%20GLM--5.1-A020F0)](https://www.zhipuai.cn/)
+[![Methodology](https://img.shields.io/badge/Methodology-Anthropic%20Harness%20Parity-D97757)](https://www.anthropic.com/)
+
+[🚀 Quick Start](#-快速开始) · [🛡️ Sentinel](#️-sentinel主路径长程-harness-与零配置-mcp) · [🤖 Vibe / Spec](#-ai-对话助手辅助路径vibe--spec) · [🏗️ Architecture](#️-项目架构) · [✍️ Author](#author--作者)
+
+---
+
+### 为什么世界需要又一个 AI IDE
+
+主流 AI Chat 工具的瓶颈是 **短链对话**：每次从零开始、需要工程师不停喂上下文、对答 bug、纠正意图。
+**NormCode 押注下一代范式：长程 Agent Harness** —— 你下达需求，IDE 内的 Sentinel 控制平面自动跑完规划 → 实现 → Verifier 验证 → 必要时联网与预览，**力争不依赖与 Chat 的多轮闲聊**完成端到端交付。
+
+> *This is not yet another GPT wrapper. It's an attempt to ship the long-running agent paradigm Anthropic engineering has been describing — as a real, runnable IDE.*
+
+---
+
+</div>
+
+# NormCode - 智能编程 IDE
 
 基于 VS Code 深度定制的 AI 原生集成开发环境，内置智谱 AI GLM 大模型；**当前版本以 Sentinel 长程自动执行为主路径**，在单应用内完成从需求到交付的闭环。
 
@@ -359,6 +385,51 @@ const response = await aiCoreService.sendRequest({
 - 所有贡献者和社区成员
 
 ---
+
+## Author / 作者
+
+<div align="center">
+
+### 王善波 · Wang Shanbo
+
+**Tech Co-founder · AI-Native Engineer · 11 yrs B2B SaaS**
+
+[![GitHub](https://img.shields.io/badge/GitHub-@wangshanbo-181717?logo=github)](https://github.com/wangshanbo)
+[![Email](https://img.shields.io/badge/Email-627257359@qq.com-D14836?logo=gmail)](mailto:627257359@qq.com)
+
+</div>
+
+NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 个人维护，36 岁，杭州。
+
+- 🏢 **Tech Co-founder @ 杭州台满满科技**，11 年 B2B SaaS 实战
+- 🧠 **月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
+- 🛠️ **跨端全栈**：Vue · React · **Flutter** · TypeScript · Java（存量维护）· IoT · Embedded
+- 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
+
+### 我为什么造 NormCode
+
+主流 AI IDE 押注的是"对话即编程" —— 你聊得越多，产出越多。
+但 **月烧 $2,000 token 的实战告诉我：对话越多，意图越散，质量越降**。
+
+真正的 AI 杠杆来自三件事：
+
+1. **长程 Harness** —— 让 Agent 跑完整个交付环路，工程师只在关键节点决策
+2. **上下文工程**（Context Engineering）—— 把公司规则、业务不变量、review SOP 持续喂给模型，每一轮对话
+3. **Verifier 工具环** —— Eval-driven 取代单元测试驱动，用可执行的探测捕获"假通过"
+
+NormCode 是这三个理念的工程化沉淀。它不完美，但它尝试解决的问题是真实的。
+
+### 内容连载
+
+我在写《**月烧 \$2,000 AI 的反常识 SOP**》系列（共 10 篇），把生产级 AI 工作流方法论开源化。
+
+- 📝 **博客**：即刻 / 微信公众号 / 知乎，搜索"王善波"或"AI Native 工程师"
+- 🔗 **GitHub**：[@wangshanbo](https://github.com/wangshanbo)
+- 📧 **Email**：[627257359@qq.com](mailto:627257359@qq.com)
+
+### Star 一下
+
+如果 NormCode 的设计理念让你眼前一亮，请给个 Star —— 这是我持续投入的最大动力，也是这个项目走出"个人作品"走向"真实社区"的第一步。
 
 <p align="center">
   <a href="https://github.com/wangshanbo/NormCode">⭐ Star NormCode on GitHub</a>
