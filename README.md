@@ -419,7 +419,7 @@ NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 业余时间个人维�
 - 🧠 **业余月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
 - 🤖 **生产代码 AI workflow 实战**：在公司代码仓库 `.cursor/` 里沉淀完整的 rules + skills SOP，驱动团队 5 个月 ship 50+ feature。底层哲学：**用最强模型写 SOP（Opus / GPT-5），用最差但能跑的模型写代码（Haiku / 3.5）；AI 写错 = SOP 不够好，从不归罪于模型**
 - 🛠️ **跨端全栈 5 端同时跑**：收银端 / 管理端 / 点单机 / 小程序 / 后端，外加 Rust（[Guard](https://github.com/wangshanbo/guard)）/ Flutter
-- 🔌 **国内硬件供应链 insider + 竞品硬件协议反推**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类 / 6 家工厂老板直达；做竞品硬件协议反推让我们能整体迁竞品老客户
+- 🔌 **6 个产品线的事实硬件架构负责人（职位是采购）+ 竞品硬件协议反推**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类，6 家 OEM 老板日常电话回访 + 共同制定技术方案（例：主导灯控**ZigBee → 433MHz → LoRa**协议演进、Android 点单机主板换代）；做竞品硬件协议反推让我们能整体迁竞品老客户
 - 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
 
 ### 我为什么造 NormCode
