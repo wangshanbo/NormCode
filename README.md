@@ -16,6 +16,20 @@
 
 ---
 
+> ## 📌 Status：**v1 · validated, then sunset**
+>
+> NormCode 跑通了 **长程 Agent Harness 在 vscode fork 之上的可行性**（v0~v9 共 10 个版本，13+ 核心服务全部上线）。
+>
+> 5 个月之后我亲手砍掉了 **vscode fork 这个产品形态** —— 因为它绑死了「代码-中心」的视角，而我真正想做的是 **让不会编程的人通过对话做出真实可演化的应用**。
+>
+> 这套领域逻辑（BudgetGovernor / EpisodicMemory / FailureTaxonomy / RollingPlanner …）已直迁到下一代 Web App **Sentinel v2**。
+>
+> 完整 build/kill/pivot 故事见 [《做就是最好的想 —— 5 个月 build 了 3 个 AI 产品，砍了 1 个》](https://github.com/wangshanbo/ai-native-sop/blob/main/00-manifesto-build-to-think.md)。
+>
+> 本仓库**保留作为开源参考实现**（长程 Agent Harness 工程范例），不再积极维护。下一代 Web App 关注 → [`wangshanbo/ai-native-sop`](https://github.com/wangshanbo/ai-native-sop)。
+
+---
+
 ### 为什么世界需要又一个 AI IDE
 
 主流 AI Chat 工具的瓶颈是 **短链对话**：每次从零开始、需要工程师不停喂上下文、对答 bug、纠正意图。
@@ -418,6 +432,22 @@ NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 个人维护，36 岁�
 3. **Verifier 工具环** —— Eval-driven 取代单元测试驱动，用可执行的探测捕获"假通过"
 
 NormCode 是这三个理念的工程化沉淀。它不完美，但它尝试解决的问题是真实的。
+
+### 然后我把 vscode fork 这个形态砍了
+
+5 个月 ship 完 v0~v9 之后，我得出一个反直觉结论：
+
+> **vscode 的 ViewPane / Webview / contribution 心智，绑死了"代码-中心"的产品视角；而我真正想做的是「不会编程的人也能持续运营一个真实可演化的应用」—— 这两件事在桌面 IDE 形态下永远拧巴。**
+
+这个结论我**在 PPT 里推演 6 个月得不到**，**build 了 6 个月之后立刻就懂了**。
+
+所以下一代产品我重写为 Web App：
+
+- 🚀 **Sentinel v2**（在做）：让普通人通过自然对话做出**真实可上线、可演化、可运营**的全栈应用。直接对标 Bolt / Lovable / v0 / Replit Agent —— 但核心差异化在「**上线后的持续演化**」，不是 5 分钟做 demo。
+- 🦀 **[Guard](https://github.com/wangshanbo/guard)**（已开源）：Rust 写的策略约束层，MCP 让 AI 有手脚，Skills 让 AI 有经验，**Guard 让 AI 不做错事**。
+- ✍️ 完整 build / kill / pivot 故事写在 [《做就是最好的想》](https://github.com/wangshanbo/ai-native-sop/blob/main/00-manifesto-build-to-think.md) 里。
+
+NormCode 留下来，作为「**长程 Agent Harness 在 vscode 之上能跑到什么程度**」的开源参考实现。
 
 ### 内容连载
 
