@@ -400,69 +400,12 @@ const response = await aiCoreService.sendRequest({
 
 ---
 
-## Author / 作者
+## Author
 
-<div align="center">
+王善波 / Wang Shanbo——在杭州的台满满科技做研发主管和硬件采购，业余时间维护 NormCode。完整介绍在 [github.com/wangshanbo](https://github.com/wangshanbo)。
 
-### 王善波 · Wang Shanbo
+主流 AI IDE 押注的是「对话即编程」——你聊得越多，产出越多。但月烧 $2,000 token 的实战让我相信另一个判断：对话越多，意图越散，质量越降。NormCode 的赌注是 Anthropic 式的长程 Agent Harness，让控制平面跑完规划、实现、Verifier 验证、必要时联网与预览，尽量不依赖多轮 chat。
 
-**Engineering Lead + Hardware Sourcing @ 台满满 · Indie AI Builder · 11 yrs B2B SaaS**
+5 个月 ship 完 v0 到 v9 之后我得出一个结论：这个范式本身可行，但 vscode fork 不是对的形态。vscode 的 ViewPane / Webview / contribution 心智绑死了「代码中心」视角，而我真正想做的是「不会编程的人也能持续演化一个真实应用」。这两件事在桌面 IDE 形态下永远拧巴，于是 NormCode 归档，留作长程 Agent Harness 在 vscode 之上能跑到什么程度的开源参考。下一代产品重写为 Web App，叫 [Sentinel](https://github.com/wangshanbo/sentinel-specs)。配套还有 [Guard](https://github.com/wangshanbo/guard)（Rust 策略层）和 [ai-native-sop](https://github.com/wangshanbo/ai-native-sop)（中文方法论连载）。
 
-[![GitHub](https://img.shields.io/badge/GitHub-@wangshanbo-181717?logo=github)](https://github.com/wangshanbo)
-[![Email](https://img.shields.io/badge/Email-627257359@qq.com-D14836?logo=gmail)](mailto:627257359@qq.com)
-
-</div>
-
-NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 业余时间个人维护，36 岁，杭州。
-
-- 🏢 **研发主管 + 硬件采购负责人 @ 台满满科技**，入职 2 年；**进公司 2 个月就因执行速度被老板转交硬件采购**；服务 500+ 球房 / 平台总流水 ¥30 亿 / 10 人研发团队
-- 🧠 **业余月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
-- 🤖 **生产代码 AI workflow 实战**：在公司代码仓库 `.cursor/` 里沉淀完整的 rules + skills SOP，驱动团队 5 个月 ship 50+ feature。底层哲学：**用最强模型写 SOP（Opus / GPT-5），用最差但能跑的模型写代码（Haiku / 3.5）；AI 写错 = SOP 不够好，从不归罪于模型**
-- 🛠️ **跨端全栈 5 端同时跑**：收银端 / 管理端 / 点单机 / 小程序 / 后端，外加 Rust（[Guard](https://github.com/wangshanbo/guard)）/ Flutter
-- 🔌 **6 个产品线的事实硬件架构负责人（职位是采购）+ 竞品硬件协议反推**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类，6 家 OEM 老板日常电话回访 + 共同制定技术方案（例：主导灯控**ZigBee → 433MHz → LoRa**协议演进、Android 点单机主板换代）；做竞品硬件协议反推让我们能整体迁竞品老客户
-- 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
-
-### 我为什么造 NormCode
-
-主流 AI IDE 押注的是"对话即编程" —— 你聊得越多，产出越多。
-但 **月烧 $2,000 token 的实战告诉我：对话越多，意图越散，质量越降**。
-
-真正的 AI 杠杆来自三件事：
-
-1. **长程 Harness** —— 让 Agent 跑完整个交付环路，工程师只在关键节点决策
-2. **上下文工程**（Context Engineering）—— 把公司规则、业务不变量、review SOP 持续喂给模型，每一轮对话
-3. **Verifier 工具环** —— Eval-driven 取代单元测试驱动，用可执行的探测捕获"假通过"
-
-NormCode 是这三个理念的工程化沉淀。它不完美，但它尝试解决的问题是真实的。
-
-### 然后我把 vscode fork 这个形态砍了
-
-5 个月 ship 完 v0~v9 之后，我得出一个反直觉结论：
-
-> **vscode 的 ViewPane / Webview / contribution 心智，绑死了"代码-中心"的产品视角；而我真正想做的是「不会编程的人也能持续运营一个真实可演化的应用」—— 这两件事在桌面 IDE 形态下永远拧巴。**
-
-这个结论我**在 PPT 里推演 6 个月得不到**，**build 了 6 个月之后立刻就懂了**。
-
-所以下一代产品我重写为 Web App：
-
-- 🚀 **[Sentinel v2](https://github.com/wangshanbo/sentinel-specs)**（在做 · 公开 specs）：让普通人通过自然对话做出**真实可上线、可演化、可运营**的全栈应用。直接对标 Bolt / Lovable / v0 / Replit Agent —— 但核心差异化在「**上线后的持续演化**」，不是 5 分钟做 demo。
-- 🦀 **[Guard](https://github.com/wangshanbo/guard)**（已开源）：Rust 写的策略约束层，MCP 让 AI 有手脚，Skills 让 AI 有经验，**Guard 让 AI 不做错事**。
-- ✍️ 完整 build / kill / pivot 故事写在 [《做就是最好的想》](https://github.com/wangshanbo/ai-native-sop/blob/main/00-manifesto-build-to-think.md) 里。
-
-NormCode 留下来，作为「**长程 Agent Harness 在 vscode 之上能跑到什么程度**」的开源参考实现。
-
-### 内容连载
-
-我在写《**月烧 \$2,000 AI 的反常识 SOP**》系列（共 10 篇），把生产级 AI 工作流方法论开源化。
-
-- 📝 **博客**：即刻 / 微信公众号 / 知乎，搜索"王善波"或"AI Native 工程师"
-- 🔗 **GitHub**：[@wangshanbo](https://github.com/wangshanbo)
-- 📧 **Email**：[627257359@qq.com](mailto:627257359@qq.com)
-
-### Star 一下
-
-如果 NormCode 的设计理念让你眼前一亮，请给个 Star —— 这是我持续投入的最大动力，也是这个项目走出"个人作品"走向"真实社区"的第一步。
-
-<p align="center">
-  <a href="https://github.com/wangshanbo/NormCode">⭐ Star NormCode on GitHub</a>
-</p>
+627257359@qq.com
