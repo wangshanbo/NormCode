@@ -406,18 +406,19 @@ const response = await aiCoreService.sendRequest({
 
 ### 王善波 · Wang Shanbo
 
-**Tech Co-founder · AI-Native Engineer · 11 yrs B2B SaaS**
+**Engineering Lead + Hardware Sourcing @ 台满满 · Indie AI Builder · 11 yrs B2B SaaS**
 
 [![GitHub](https://img.shields.io/badge/GitHub-@wangshanbo-181717?logo=github)](https://github.com/wangshanbo)
 [![Email](https://img.shields.io/badge/Email-627257359@qq.com-D14836?logo=gmail)](mailto:627257359@qq.com)
 
 </div>
 
-NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 个人维护，36 岁，杭州。
+NormCode 由 [@wangshanbo](https://github.com/wangshanbo) 业余时间个人维护，36 岁，杭州。
 
-- 🏢 **Tech Co-founder @ 杭州台满满科技**，11 年 B2B SaaS 实战
-- 🧠 **月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
-- 🛠️ **跨端全栈**：Vue · React · **Flutter** · TypeScript · Java（存量维护）· IoT · Embedded
+- 🏢 **研发主管 + 硬件采购负责人 @ 台满满科技**，跟随创始人 5+ 年；服务 500+ 球房 / 平台总流水 ¥30 亿 / 10 人研发团队
+- 🧠 **业余月烧 $2,000 / 6 亿 tokens** 在 Claude Opus / GPT 等顶级模型上，把 AI 用成生产力，不是玩具
+- 🛠️ **跨端全栈**：Vue · React · **Flutter** · TypeScript · Java（存量维护）· Rust（[Guard](https://github.com/wangshanbo/guard)）
+- 🔌 **国内硬件供应链 insider**：灯控 / 存杆柜 / 点单机（串口充电）/ 电视 / 一体机 6 类 / 6 家工厂老板直达
 - 📦 0→1 交付 5+ 行业（教育、电子合同、网吧 SaaS、球房 SaaS、POS 零售）
 
 ### 我为什么造 NormCode
@@ -443,7 +444,7 @@ NormCode 是这三个理念的工程化沉淀。它不完美，但它尝试解�
 
 所以下一代产品我重写为 Web App：
 
-- 🚀 **Sentinel v2**（在做）：让普通人通过自然对话做出**真实可上线、可演化、可运营**的全栈应用。直接对标 Bolt / Lovable / v0 / Replit Agent —— 但核心差异化在「**上线后的持续演化**」，不是 5 分钟做 demo。
+- 🚀 **[Sentinel v2](https://github.com/wangshanbo/sentinel-specs)**（在做 · 公开 specs）：让普通人通过自然对话做出**真实可上线、可演化、可运营**的全栈应用。直接对标 Bolt / Lovable / v0 / Replit Agent —— 但核心差异化在「**上线后的持续演化**」，不是 5 分钟做 demo。
 - 🦀 **[Guard](https://github.com/wangshanbo/guard)**（已开源）：Rust 写的策略约束层，MCP 让 AI 有手脚，Skills 让 AI 有经验，**Guard 让 AI 不做错事**。
 - ✍️ 完整 build / kill / pivot 故事写在 [《做就是最好的想》](https://github.com/wangshanbo/ai-native-sop/blob/main/00-manifesto-build-to-think.md) 里。
 
